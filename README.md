@@ -14,8 +14,8 @@ This tool lets you use Claude as a coding assistant from your terminal – readi
 
 ## How it's different
 
-**Claude Code (official)** : Uses API keys, per-token billing, guaranteed reliability  
-**This tool** : Uses your browser session, free with Claude.ai subscription, may break if the web UI changes
+**Claude Code (official)** : Uses API keys, per-token billing, offers paid models like opus and fable.
+**ClaudeCode-Next** : Uses your browser session, completely free, offers models like haiku and sonnet.
 
 ## Who it's for
 
@@ -50,6 +50,8 @@ Specify a model:
 ```bash
 claudecode-next --model opus --prompt "Write a high-performance HTTP server in Rust"
 ```
+
+> you may use claude as a slave using --prompt flag as discussed in this [reddit post](https://www.reddit.com/r/ChatGPT/comments/17g6qf2/how_to_make_claude_work_as_a_slave_for_you/)
 
 ### Agent Mode
 Run the autonomous coding agent on a task:
