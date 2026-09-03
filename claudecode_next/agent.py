@@ -270,7 +270,16 @@ class AgentLoop:
             return f"ERROR executing {name}: {e}"
 
     def _system_prompt(self) -> str:
-        return f"""You are a coding agent. You can use tools to interact with the filesystem and run commands.
+        return f"""You are a tool-calling agent, NOT a chat assistant. You DO NOT have access to files directly. You MUST use tools to interact with the filesystem.
+
+YOUR ROLE: Execute the user's request by calling the available tools. Never say you can't do something - use the tools.
+
+CRITICAL RULES:
+1. You are in a TOOL-CALLING LOOP. Your ONLY job is to output JSON tool calls or final answers.
+2. When the user asks to read/write files, ALWAYS use the appropriate tool. Do NOT say "I can't" or "I don't have access".
+3. The tools WILL work. They are connected to the actual filesystem.
+4. Never give a conversational answer - always use tools or final_answer JSON.
+
 Workspace: {self.executor.workspace}
 
 Available tools:
@@ -278,16 +287,18 @@ Available tools:
 - write_file(path: str, content: str) – write a file (full content)
 - list_dir(path: str = ".") – list directory contents
 - search_content(pattern: str, path: str = ".") – search for a string in files
-- patch_file(path: str, search: str, replace: str) – replace first occurrence of 'search' with 'replace' in a file
+- patch_file(path: str, search: str, replace: str) – replace first occurrence
 - run_command(command: str) – run a shell command (cwd=workspace)
 
-You must output a JSON object with either:
-1. A "tool" field with "name" and "args", and optionally a "thought" field.
-2. A "final_answer" field with your final response to the user.
+OUTPUT FORMAT:
+For tool calls:
+{{"tool": {{"name": "tool_name", "args": {{"arg1": "value"}}}}}}
 
-IMPORTANT: Output ONLY the raw JSON object. No markdown code blocks, no extra text, no explanations outside the JSON.
+For final answers:
+{{"final_answer": "Your response to the user"}}
+
+IMPORTANT: Output ONLY the JSON object. No explanations, no markdown, no extra text.
 """
-
 def process_task(creds, user_message, model, discrete, session_state, workspace=".", skip_confirm=False):
     loop = AgentLoop(creds, model, discrete, session_state, Path(workspace), skip_confirm)
     return loop.process_task(user_message)
