@@ -51,7 +51,7 @@ Specify a model:
 claudecode-next --model opus --prompt "Write a high-performance HTTP server in Rust"
 ```
 
-> you may use claude as a slave using --prompt flag as discussed in this [reddit post](https://www.reddit.com/r/ChatGPT/comments/17g6qf2/how_to_make_claude_work_as_a_slave_for_you/)
+> you may use claude as a slave using --prompt flag as discussed in this [reddit post](https://www.reddit.com/r/ChatGPTCoding/s/4KJ7NL8bf6)
 
 ### Agent Mode
 Run the autonomous coding agent on a task:
