@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+recursive-include claudecode_next *.py
+exclude claude_profile/*
+exclude agent.log
+exclude last_response.txt

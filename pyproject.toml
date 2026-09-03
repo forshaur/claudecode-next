@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudecode-next"
+version = "1.0.0"
+authors = [
+    { name = "Shaurya Mishra", email = "shaur.codes@gmail.com" },
+]
+description = "Claude.ai RE Client v4 — CLI client, session manager, and autonomous coding agent."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Communications :: Chat",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "curl_cffi>=0.5.10",
+    "tzlocal>=4.0",
+]
+
+[project.optional-dependencies]
+browser = [
+    "playwright>=1.30.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/forshaur/claudecode-next"
+"Bug Tracker" = "https://github.com/forshaur/claudecode-next/issues"
+
+[project.scripts]
+claudecode-next = "claudecode_next.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["claudecode_next*"]

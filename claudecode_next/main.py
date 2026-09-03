@@ -40,9 +40,9 @@ def _cleanup_session(creds, session, discrete):
 
 def main():
     print()
-    print("  ╔══════════════════════════════════════════════════════════════════╗")
-    print("  ║  Claude.ai RE Client v4 — Secure + discrete                     ║")
-    print("  ╚══════════════════════════════════════════════════════════════════╝")
+    print("  ╔══════════════════════════════════════════════════════════════════════╗")
+    print("  ║  ClaudeCode-Next | Github:https://github.com/forshaur/claudecode-next║")
+    print("  ╚══════════════════════════════════════════════════════════════════════╝")
     print()
 
     ap = argparse.ArgumentParser(description="Claude.ai Security Research Client v4")
@@ -54,7 +54,7 @@ def main():
         "--model",
         type=str,
         default="sonnet",
-        help="Model: haiku/sonnet/opus (default: sonnet)",
+        help="Model: haiku/sonnet (default: sonnet)",
     )
     ap.add_argument("--org-id", type=str, help="Organization ID")
     ap.add_argument("--conv-id", type=str, help="Conversation ID")
