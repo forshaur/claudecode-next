@@ -13,7 +13,7 @@ from .config import CRED_FILE, URL_BASE, PROFILE
 
 
 class CredentialManager:
-    """Manages Claude.ai session credentials (org_id, conv_id, cookies)."""
+    """Manages cookies and conversation ids"""
 
     def __init__(self):
         self.org_id = None
@@ -55,7 +55,6 @@ class CredentialManager:
         print(f"[+] Credentials saved â†’ {CRED_FILE}")
 
     def clear(self):
-        """Wipe credentials from disk and memory."""
         self.org_id = None
         self.conv_id = None
         self.session_key = None

@@ -25,11 +25,12 @@ from .credentials import CredentialManager
 from .http import stream_prompt, _delete_conversation
 from .chrome import do_login
 from .repl import print_help, print_models, handle_command
+from .agent import process_task
 
 
-def _cleanup_session(creds, session, stealth):
-    """Delete the session conversation if stealth is on."""
-    if stealth and session.get("conv_id") and session.get("created"):
+def _cleanup_session(creds, session, discrete):
+    """Delete the session conversation if discrete is on."""
+    if discrete and session.get("conv_id") and session.get("created"):
         print("\n[*] Cleaning up session conversation...")
         _delete_conversation(creds, session["conv_id"])
         print("[+] Session cleaned (invisible in browser)")
@@ -39,9 +40,9 @@ def _cleanup_session(creds, session, stealth):
 
 def main():
     print()
-    print("  â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—")
-    print("  â•‘  Claude.ai RE Client v4 â€” Secure + Stealth        â•‘")
-    print("  â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•")
+    print("  ╔══════════════════════════════════════════════════════════════════╗")
+    print("  ║  Claude.ai RE Client v4 — Secure + discrete                     ║")
+    print("  ╚══════════════════════════════════════════════════════════════════╝")
     print()
 
     ap = argparse.ArgumentParser(description="Claude.ai Security Research Client v4")
@@ -60,22 +61,24 @@ def main():
     ap.add_argument("--cookie", type=str, help="Full Cookie header string")
     ap.add_argument("--jailbreak", type=str, help="Read prompt from file")
     ap.add_argument("--batch", type=str, help="Send multiple prompts from file")
-    ap.add_argument("--no-stealth", action="store_true", help="Disable stealth mode")
+    ap.add_argument("--no-discrete", action="store_true", help="Disable discrete mode")
     ap.add_argument("--clear-session", action="store_true", help="Delete stored credentials")
+    ap.add_argument("--workspace", type=str, default=".", help="Workspace directory for agent mode")
+    ap.add_argument("--skip-dangerous-permissions", action="store_true", help="Auto-approve all tool calls")
     args = ap.parse_args()
 
-    # â”€â”€ Clear session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Clear session ──────────────────────────────────────────────────────────
     if args.clear_session:
         creds = CredentialManager()
         creds.clear()
         return
 
-    # â”€â”€ Login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Login ──────────────────────────────────────────────────────────────────
     if args.login:
         do_login()
         return
 
-    # â”€â”€ Credential resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Credential resolution ──────────────────────────────────────────────────
     creds = CredentialManager()
 
     if args.auto_fetch:
@@ -97,34 +100,37 @@ def main():
         print("[!] Invalid credentials")
         return
 
-    # â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── State ──────────────────────────────────────────────────────────────────
     model = resolve_model(args.model)
-    stealth = not args.no_stealth
+    discrete = not args.no_discrete
 
     # Session state: tracks the current conversation for memory
     session = {"conv_id": None, "created": False}
 
     lib = "curl_cffi" if HAS_CFFI else "requests"
-    mode = "stealth" if stealth else "visible"
+    mode = "discrete" if discrete else "visible"
+    agent_mode = False  # toggle for agent mode
     print(f"[+] model:   {model}")
     print(f"[+] tz:      (auto-detected)")
     print(f"[+] http:    {lib}")
-    print(f"[+] stealth: {mode}  (memory ON, cleanup on exit)")
+    print(f"[+] discrete: {mode}  (memory ON, cleanup on exit)")
     print(f"[+] creds:   {CRED_FILE}")
-    print(f"[+] Type /help for commands\n")
+    print(f"[+] Type /help for commands")
+    print(f"[+] Agent mode: /agent to toggle (workspace: {args.workspace})")
+    print()
 
-    # â”€â”€ Jailbreak mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Jailbreak mode ─────────────────────────────────────────────────────────
     if args.jailbreak:
         if not os.path.exists(args.jailbreak):
             print(f"[!] File not found: {args.jailbreak}")
             return
         with open(args.jailbreak, "r", encoding="utf-8") as f:
             prompt = f.read().strip()
-        stream_prompt(creds, prompt, model, stealth, session)
-        _cleanup_session(creds, session, stealth)
+        stream_prompt(creds, prompt, model, discrete, session)
+        _cleanup_session(creds, session, discrete)
         return
 
-    # â”€â”€ Batch mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Batch mode ─────────────────────────────────────────────────────────────
     if args.batch:
         if not os.path.exists(args.batch):
             print(f"[!] File not found: {args.batch}")
@@ -134,7 +140,7 @@ def main():
         results = []
         for i, p in enumerate(prompts):
             print(f"  [{i+1}/{len(prompts)}] {p[:60]}")
-            r = stream_prompt(creds, p, model, stealth, session)
+            r = stream_prompt(creds, p, model, discrete, session)
             results.append({"prompt": p, "response": r or ""})
             if i < len(prompts) - 1:
                 time.sleep(2)
@@ -142,16 +148,16 @@ def main():
         with open(out, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"[+] Saved -> {out}")
-        _cleanup_session(creds, session, stealth)
+        _cleanup_session(creds, session, discrete)
         return
 
-    # â”€â”€ Single prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Single prompt ──────────────────────────────────────────────────────────
     if args.prompt:
-        stream_prompt(creds, args.prompt, model, stealth, session)
-        _cleanup_session(creds, session, stealth)
+        stream_prompt(creds, args.prompt, model, discrete, session)
+        _cleanup_session(creds, session, discrete)
         return
 
-    # â”€â”€ Interactive REPL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Interactive REPL ──────────────────────────────────────────────────────
     try:
         while True:
             try:
@@ -163,31 +169,41 @@ def main():
             if inp.lower() in ("exit", "quit", "q"):
                 break
 
-            # â”€â”€ REPL commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # Toggle agent mode
+            if inp.startswith("/agent"):
+                agent_mode = not agent_mode
+                print(f"[+] Agent mode {'ON' if agent_mode else 'OFF'}")
+                continue
+
+            # ── REPL commands ──────────────────────────────────────────────────
             if inp.startswith("/"):
                 parts = inp.split(None, 1)
                 cmd = parts[0].lower()
                 arg = parts[1].strip() if len(parts) > 1 else ""
 
-                should_continue, model, stealth, should_break = handle_command(
+                should_continue, model, discrete, should_break = handle_command(
                     cmd,
                     arg,
                     model=model,
-                    stealth=stealth,
+                    discrete=discrete,
                     session=session,
                     creds=creds,
-                    cleanup_session_fn=lambda: _cleanup_session(creds, session, stealth),
+                    cleanup_session_fn=lambda: _cleanup_session(creds, session, discrete),
                 )
                 if should_break:
                     break
                 continue
 
-            # â”€â”€ Send prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            print()
-            stream_prompt(creds, inp, model, stealth, session)
+            # ── Send prompt ────────────────────────────────────────────────────
+            if agent_mode:
+                print()
+                process_task(creds, inp, model, discrete, session, workspace=args.workspace, skip_confirm=args.skip_dangerous_permissions)
+            else:
+                print()
+                stream_prompt(creds, inp, model, discrete, session)
     finally:
         # Always cleanup on exit
-        _cleanup_session(creds, session, stealth)
+        _cleanup_session(creds, session, discrete)
 
 
 if __name__ == "__main__":
