@@ -17,11 +17,10 @@ This tool lets you use Claude as a coding assistant from your terminal – readi
 **Claude Code (official)** : Uses API keys, per-token billing, offers paid models like opus and fable.
 **ClaudeCode-Next** : Uses your browser session, completely free, offers models like haiku and sonnet.
 
-## Who it's for
+## Best Practices
 
-- Developers without Claude API access
-- Hobbyists who want to experiment with CLI coding agents
-- Anyone who prefers the terminal over the chat interface
+- Use gemini pro for reasoning and use claudecode-next with --prompt flag to use claude as a slave for coding.
+- Use your favourite models for whatever tasks you like but save your tokens for the tasks that require less reasoning and effort - like generating summary of a page or a document, rephrasing a text or a code, minimizing code, etc.
 
 ## Installation
 
