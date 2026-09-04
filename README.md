@@ -76,3 +76,6 @@ claudecode-next --manual
 ## ⚠️ Disclaimer
 
 This is an **unofficial, research-grade tool**. It's not endorsed by Anthropic, uses the Claude.ai web interface (which may violate ToS), and can break at any time, **developers won't be responsible for any misuse and damage caused by it**. Use responsibly and at your own risk.
+
+### Credits
+This is fork of [claude-ai-reclient](https://github.com/Adithyan-Defender/claude-ai-re-client). I have taken the liberty to implement agentic capabilities into it. I would like to thank the original author for providing the base code.
