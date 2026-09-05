@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any
 
 # ANSI colours
 GREEN = "\033[92m"
@@ -22,15 +22,13 @@ class ToolExecutor:
         self.workspace = Path(workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.log_file = self.workspace / "agent.log"
-        self.max_read_bytes = 50 * 1024  # 50KB limit
+        self.max_read_bytes = 50 * 1024
 
     def _resolve(self, path: str) -> Path:
         p = (self.workspace / path).resolve()
         if not str(p).startswith(str(self.workspace)):
             raise ValueError(f"Path outside workspace: {p}")
         return p
-
-    # -------- Tools --------
 
     def read_file(self, path: str) -> str:
         p = self._resolve(path)
@@ -39,11 +37,10 @@ class ToolExecutor:
         try:
             size = p.stat().st_size
             if size > self.max_read_bytes:
-                # Truncate and warn
                 with p.open("rb") as f:
-                    content = f.read(self.max_read_bytes).decode("utf-8", errors="replace")
+                    content = f.read(self.max_read_bytes).decode("utf-8-sig", errors="replace")
                 return f"{content}\n\n[TRUNCATED: file is {size} bytes, only first {self.max_read_bytes} bytes shown]"
-            return p.read_text(encoding="utf-8")
+            return p.read_text(encoding="utf-8-sig")
         except Exception as e:
             return f"ERROR reading {path}: {e}"
 
@@ -63,7 +60,6 @@ class ToolExecutor:
         return "\n".join(items) or "(empty)"
 
     def search_content(self, pattern: str, path: str = ".") -> str:
-        """Search for pattern in files (grep-like)."""
         p = self._resolve(path)
         if p.is_file():
             files = [p]
@@ -72,7 +68,7 @@ class ToolExecutor:
         results = []
         for f in files:
             try:
-                with f.open(encoding="utf-8", errors="ignore") as fp:
+                with f.open(encoding="utf-8-sig", errors="ignore") as fp:
                     for i, line in enumerate(fp, 1):
                         if pattern in line:
                             results.append(f"{f.relative_to(self.workspace)}:{i}: {line.strip()}")
@@ -80,28 +76,24 @@ class ToolExecutor:
                 continue
         if not results:
             return "No matches found."
-        # Limit to 50 lines to avoid flooding
         return "\n".join(results[:50]) + (f"\n... and {len(results)-50} more" if len(results)>50 else "")
 
     def patch_file(self, path: str, search: str, replace: str) -> str:
-        """Apply a SEARCH/REPLACE patch to a file."""
         p = self._resolve(path)
         if not p.exists():
             return f"ERROR: file not found: {path}"
         try:
-            content = p.read_text(encoding="utf-8")
+            content = p.read_text(encoding="utf-8-sig")
             if search not in content:
                 return "ERROR: search string not found in file."
-            new_content = content.replace(search, replace, 1)  # only first occurrence
+            new_content = content.replace(search, replace, 1)
             p.write_text(new_content, encoding="utf-8")
             return f"Patched {path} (replaced 1 occurrence)"
         except Exception as e:
             return f"ERROR patching {path}: {e}"
 
     def run_command(self, command: str, stream_output: bool = True) -> str:
-        """Run a shell command, with optional live streaming."""
         try:
-            # We'll use Popen to capture and optionally stream
             proc = subprocess.Popen(
                 command,
                 shell=True,
@@ -124,21 +116,17 @@ class ToolExecutor:
                         sys.stdout.flush()
                     output_lines.append(line)
             proc.wait()
-            return_code = proc.returncode
             full_output = "".join(output_lines)
-            # Truncate for Claude: return last 200 lines + exit code
             lines = full_output.splitlines()
             if len(lines) > 200:
                 truncated = "\n".join(lines[-200:])
                 result = f"(truncated to last 200 lines)\n{truncated}\n"
             else:
                 result = full_output
-            result += f"\n[exit code: {return_code}]"
+            result += f"\n[exit code: {proc.returncode}]"
             return result
         except Exception as e:
             return f"ERROR running command: {e}"
-
-    # -------- Logging --------
 
     def log_action(self, action: str, detail: str = ""):
         with self.log_file.open("a", encoding="utf-8") as f:
@@ -147,14 +135,14 @@ class ToolExecutor:
 
 def parse_response(text: str) -> Dict[str, Any]:
     """Extract JSON tool call from Claude's response."""
-    # 1. Try to parse the entire text as JSON
+    # 1. Try full JSON parse
     try:
         data = json.loads(text.strip())
         return data
     except json.JSONDecodeError:
         pass
 
-    # 2. Try to extract from a Markdown code block
+    # 2. Try markdown code block
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         try:
@@ -162,7 +150,7 @@ def parse_response(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # 3. Try to find a raw JSON object (greedy)
+    # 3. Try raw braces (greedy)
     match = re.search(r"(\{.*\})", text, re.DOTALL)
     if match:
         try:
@@ -170,27 +158,20 @@ def parse_response(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # 4. If all else fails, treat as final answer, but if it looks like JSON, try once more
-    #    (some models might include leading/trailing whitespace)
-    if text.strip().startswith("{") and text.strip().endswith("}"):
+    # 4. If the whole text looks like JSON, try one more time
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
         try:
-            return json.loads(text.strip())
+            return json.loads(stripped)
         except:
             pass
 
-    # 5. Fallback: treat as plain text
+    # 5. Fallback: plain text
     return {"final_answer": text}
 
+
 class AgentLoop:
-    def __init__(
-        self,
-        creds,
-        model: str,
-        discrete: bool,
-        session_state: dict,
-        workspace: Path,
-        skip_confirm: bool = False,
-    ):
+    def __init__(self, creds, model: str, discrete: bool, session_state: dict, workspace: Path, skip_confirm: bool = False):
         self.creds = creds
         self.model = model
         self.discrete = discrete
@@ -199,7 +180,6 @@ class AgentLoop:
         self.skip_confirm = skip_confirm
 
     def _confirm(self, tool_name: str, args: dict) -> bool:
-        # Auto-approve read-only tools
         if tool_name in ("read_file", "list_dir", "search_content"):
             return True
         if self.skip_confirm:
@@ -215,14 +195,26 @@ class AgentLoop:
             print("  Please answer y or n.")
 
     def process_task(self, user_message: str) -> str:
-        """Run the agent loop until final answer."""
         from .http import stream_prompt
+
+        # Start a fresh conversation for this task (no memory from previous tasks)
+        self.session["conv_id"] = None
+        self.session["created"] = False
 
         current_msg = user_message
         system_prompt = self._system_prompt()
+        is_first_turn = True
+        consecutive_failures = 0  # count non-JSON responses
 
         while True:
             print(f"{BLUE}[Agent] Sending...{RESET}")
+
+            # If we've had two non-JSON responses, resend system prompt as a reminder
+            if consecutive_failures >= 2:
+                print(f"{YELLOW}[Agent] Re-sending system prompt (Claude forgot its role){RESET}")
+                is_first_turn = True
+                consecutive_failures = 0
+
             response = stream_prompt(
                 self.creds,
                 current_msg,
@@ -230,18 +222,30 @@ class AgentLoop:
                 discrete=self.discrete,
                 session_state=self.session,
                 quiet=True,
-                system_prompt=system_prompt,
+                system_prompt=system_prompt if is_first_turn else None,
             )
+            is_first_turn = False
+
             if response is None:
                 return "ERROR: Claude returned no response."
 
-            # Parse
             data = parse_response(response)
+
+            # Detect conversational refusal (Claude forgot its role)
             if "final_answer" in data:
-                final = data["final_answer"]
+                final_text = data["final_answer"]
+                # If it sounds like a refusal, treat as failure
+                if any(phrase in final_text.lower() for phrase in ["i can't", "i don't have access", "i don't see", "can't access"]):
+                    print(f"{YELLOW}[Agent] Claude gave a conversational refusal. Resetting...{RESET}")
+                    consecutive_failures += 1
+                    # Send a strong reminder as the next user message
+                    current_msg = f"REMINDER: You are a tool-calling agent. Output JSON only. Do not say you can't. Use tools. User request: {user_message}"
+                    continue
+
+                # Otherwise it's a proper final answer
                 print(f"{GREEN}[Agent] Final answer:{RESET}")
-                print(final)
-                return final
+                print(final_text)
+                return final_text
 
             if "tool" in data:
                 tool = data["tool"]
@@ -257,8 +261,9 @@ class AgentLoop:
                 result = self._execute_tool(name, args)
                 self.executor.log_action(name, f"{args} -> {result[:200]}")
 
+                # Tool result as next user message
                 current_msg = f"Tool result for {name}({json.dumps(args)}):\n{result}"
-                # loop continues
+                consecutive_failures = 0  # reset on success
 
     def _execute_tool(self, name: str, args: dict) -> str:
         method = getattr(self.executor, name, None)
@@ -299,6 +304,8 @@ For final answers:
 
 IMPORTANT: Output ONLY the JSON object. No explanations, no markdown, no extra text.
 """
+
+
 def process_task(creds, user_message, model, discrete, session_state, workspace=".", skip_confirm=False):
     loop = AgentLoop(creds, model, discrete, session_state, Path(workspace), skip_confirm)
     return loop.process_task(user_message)
