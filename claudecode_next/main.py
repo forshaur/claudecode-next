@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--no-discrete", action="store_true", help="Disable discrete mode")
     ap.add_argument("--clear-session", action="store_true", help="Delete stored credentials")
     ap.add_argument("--workspace", type=str, default=".", help="Workspace directory for agent mode")
-    ap.add_argument("--skip-dangerous-permissions", action="store_true", help="Auto-approve all tool calls")
+    ap.add_argument("--dangerously-skip-permissions", action="store_true", help="Auto-approve all tool calls")
     args = ap.parse_args()
 
     # ── Clear session ──────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ def main():
             # ── Send prompt ────────────────────────────────────────────────────
             if agent_mode:
                 print()
-                process_task(creds, inp, model, discrete, session, workspace=args.workspace, skip_confirm=args.skip_dangerous_permissions)
+                process_task(creds, inp, model, discrete, session, workspace=args.workspace, skip_confirm=args.dangerously_skip_permissions)
             else:
                 print()
                 stream_prompt(creds, inp, model, discrete, session)

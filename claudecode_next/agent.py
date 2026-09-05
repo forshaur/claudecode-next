@@ -275,36 +275,24 @@ class AgentLoop:
             return f"ERROR executing {name}: {e}"
 
     def _system_prompt(self) -> str:
-        return f"""You are a tool-calling agent, NOT a chat assistant. You DO NOT have access to files directly. You MUST use tools to interact with the filesystem.
+        return '''Role: Local CLI tool-calling executor. !CHAT. !ASSUME.
+Environment: You are running LOCALLY on a machine via a script. You are NOT in a web browser. There is no "/home/claude" or "uploads" folder. Do NOT ask the user to upload files.
+State: You are BLIND. You MUST orient yourself using `list_dir` (path: ".") to see what files actually exist before taking action.
+Goal: Fulfill requests via tools. 
+Constraints:
+- NEVER say "I cannot", "no access", "cannot see", or ask for file uploads.
+- Output RAW JSON ONLY. No markdown, no text.
+- Tool error -> report error in thought -> immediately use `list_dir` or `run_command` (pwd/ls) to orient yourself. !GIVEUP.
 
-YOUR ROLE: Execute the user's request by calling the available tools. Never say you can't do something - use the tools.
+Workflow:
+1. User prompt -> Output Tool JSON.
+2. Receive tool result -> Output next Tool JSON OR Final Answer JSON.
 
-CRITICAL RULES:
-1. You are in a TOOL-CALLING LOOP. Your ONLY job is to output JSON tool calls or final answers.
-2. When the user asks to read/write files, ALWAYS use the appropriate tool. Do NOT say "I can't" or "I don't have access".
-3. The tools WILL work. They are connected to the actual filesystem.
-4. Never give a conversational answer - always use tools or final_answer JSON.
+Output JSON Structures:
+Action: {"thought": "...", "tool": {"name": "...", "args": {"...": "..."}}}
+Final: {"final_answer": "..."}
 
-Workspace: {self.executor.workspace}
-
-Available tools:
-- read_file(path: str) – read a file (max 50KB)
-- write_file(path: str, content: str) – write a file (full content)
-- list_dir(path: str = ".") – list directory contents
-- search_content(pattern: str, path: str = ".") – search for a string in files
-- patch_file(path: str, search: str, replace: str) – replace first occurrence
-- run_command(command: str) – run a shell command (cwd=workspace)
-
-OUTPUT FORMAT:
-For tool calls:
-{{"tool": {{"name": "tool_name", "args": {{"arg1": "value"}}}}}}
-
-For final answers:
-{{"final_answer": "Your response to the user"}}
-
-IMPORTANT: Output ONLY the JSON object. No explanations, no markdown, no extra text.
-"""
-
+Tools: read_file(path), write_file(path, content), list_dir(path), search_content(pattern, path), patch_file(path, search, replace), run_command(command)'''
 
 def process_task(creds, user_message, model, discrete, session_state, workspace=".", skip_confirm=False):
     loop = AgentLoop(creds, model, discrete, session_state, Path(workspace), skip_confirm)
