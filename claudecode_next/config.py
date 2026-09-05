@@ -2,9 +2,9 @@
 import datetime
 import os
 import sys
+from pathlib import Path
 
-# â”€â”€ Dependency Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+# ---- Dependency check ----
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CFFI = True
@@ -20,21 +20,21 @@ if not HAS_CFFI and not std_requests:
     print("[!] pip install curl_cffi")
     sys.exit(1)
 
-# â”€â”€ Paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROFILE = os.path.join(DIR, "claude_profile")
-EDITOR = os.environ.get('EDITOR', 'nano')   # fallback
+# ---- Paths ----
+DIR = Path(__file__).resolve().parent.parent   # project root
 
 if sys.platform == "win32":
-    _CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "claude_re")
+    _CONFIG_DIR = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "claude_re"
 else:
-    _CONFIG_DIR = os.path.expanduser("~/.config/claude_re")
-os.makedirs(_CONFIG_DIR, exist_ok=True)
-CRED_FILE = os.path.join(_CONFIG_DIR, "claude_session.json")
+    _CONFIG_DIR = Path(os.path.expanduser("~/.config/claude_re"))
+_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# â”€â”€ Network Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+CRED_FILE = _CONFIG_DIR / "claude_session.json"
+DEEPSEEK_SESSION_FILE = _CONFIG_DIR / "deepseek_session.json"
+DEEPSEEK_PROFILE_DIR = DIR / "deepseek_profile"
+PROFILE = DIR / "claude_profile"
 
+# ---- Network Constants ----
 URL_BASE = "https://claude.ai"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -42,34 +42,35 @@ UA = (
 )
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
-# â”€â”€ Model Aliases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+# ---- Claude Model Aliases ----
 MODEL_ALIASES = {
-    # Current generation (FREE)
     "haiku":        "claude-haiku-4-5",
     "sonnet":       "claude-sonnet-4-6",
     "sonnet-4-5":   "claude-sonnet-4-5",
-    # Dated snapshots (FREE)
     "haiku-snap":   "claude-haiku-4-5-20251001",
     "sonnet-snap":  "claude-sonnet-4-5-20250929",
-    # Premium (PRO/MAX only)
     "opus":         "claude-opus-4-7",
     "opus-3":       "claude-3-opus-20240229",
 }
 
-
 def resolve_model(name):
-    """Resolve shorthand or full model name."""
     if name in MODEL_ALIASES:
         return MODEL_ALIASES[name]
     return name
 
+# ---- DeepSeek Aliases ----
+DEEPSEEK_MODEL_ALIASES = {
+    "instant": "default",
+    "expert": "expert",
+    "deepseek": "default",
+    "default": "default",
+}
 
-# â”€â”€ Timezone Detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+DEFAULT_PROVIDER = "claude"
+PROVIDERS = ["claude", "deepseek"]
 
+# ---- Timezone detection ----
 def _detect_timezone():
-    """Detect system IANA timezone. Falls back to UTC with warning."""
-    # Method 1: Python 3.9+ datetime.astimezone()
     try:
         tz = datetime.datetime.now().astimezone().tzinfo
         if hasattr(tz, 'key'):
@@ -80,7 +81,6 @@ def _detect_timezone():
     except:  # noqa: E722
         pass
 
-    # Method 2: try tzlocal (if installed)
     try:
         from tzlocal import get_localzone
         tz = str(get_localzone())
@@ -89,7 +89,6 @@ def _detect_timezone():
     except ImportError:
         pass
 
-    # Method 3: Windows registry
     if sys.platform == "win32":
         try:
             import winreg
@@ -116,7 +115,6 @@ def _detect_timezone():
         except:  # noqa: E722
             pass
 
-    # Method 4: /etc/timezone (Linux)
     try:
         with open("/etc/timezone") as f:
             tz = f.read().strip()
@@ -128,11 +126,9 @@ def _detect_timezone():
     print("[!] WARNING: Could not detect system timezone. Falling back to UTC.")
     return "Etc/UTC"
 
-
 SYSTEM_TIMEZONE = _detect_timezone()
 
-# â”€â”€ Payload Template â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+# ---- Payload Template (Claude) ----
 PAYLOAD_TEMPLATE = {
     "prompt": "",
     "model": DEFAULT_MODEL,
@@ -147,3 +143,6 @@ PAYLOAD_TEMPLATE = {
     "files": [],
     "sync_sources": []
 }
+
+# ---- Editor ----
+EDITOR = os.environ.get('EDITOR', 'nano')

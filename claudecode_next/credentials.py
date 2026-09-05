@@ -9,8 +9,8 @@ import sys
 import time
 import uuid
 
-from .config import CRED_FILE, URL_BASE, PROFILE
 
+from .config import CRED_FILE,PROFILE, URL_BASE
 
 class CredentialManager:
     """Manages cookies and conversation ids"""

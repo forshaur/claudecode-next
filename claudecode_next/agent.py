@@ -1,5 +1,4 @@
-# agent.py
-"""Coding agent – tool calling on top of Claude.ai RE Client."""
+"""Coding agent – tool calling on top of Claude.ai RE Client or DeepSeek."""
 import json
 import os
 import re
@@ -12,10 +11,9 @@ from typing import Dict, Any
 
 from rich.console import Console
 from rich.syntax import Syntax
-from rich.text import Text
 from rich.panel import Panel
 
-# ANSI colours (still used for fallback)
+# ANSI colours (fallback)
 GREEN = "\033[92m"
 BLUE = "\033[94m"
 YELLOW = "\033[93m"
@@ -24,6 +22,11 @@ RESET = "\033[0m"
 
 console = Console()
 
+# ---- Global streaming status (for UI) ----
+streaming_status = {'active': False, 'start': 0.0}
+
+# Import provider abstraction
+from .providers import get_stream_function
 
 class ToolExecutor:
     """Executes file/command tools restricted to a workspace."""
@@ -53,9 +56,6 @@ class ToolExecutor:
             # Syntax highlight
             ext = p.suffix.lstrip('.') or 'txt'
             syntax = Syntax(content, ext, theme="monokai", line_numbers=True)
-            # We return the rich renderable as a string? But _execute_tool expects string.
-            # Instead, we'll render to console directly? But we want to capture output.
-            # We'll convert to string with ansi escapes.
             from io import StringIO
             from rich.console import Console as RichConsole
             f = StringIO()
@@ -67,7 +67,6 @@ class ToolExecutor:
 
     def write_file(self, path: str, content: str) -> str:
         p = self._resolve(path)
-        # Show diff if file exists
         if p.exists() and self.confirm_required:
             old = p.read_text(encoding="utf-8-sig") if p.exists() else ""
             if old != content:
@@ -123,7 +122,6 @@ class ToolExecutor:
             content = p.read_text(encoding="utf-8-sig")
             if search not in content:
                 return "ERROR: search string not found in file."
-            # Show diff preview
             if self.confirm_required:
                 new_content = content.replace(search, replace, 1)
                 diff = difflib.unified_diff(
@@ -136,8 +134,6 @@ class ToolExecutor:
                 diff_text = '\n'.join(diff)
                 if diff_text:
                     console.print(Panel(diff_text, title="Patch Diff", border_style="yellow"))
-            # Actually apply after confirmation in agent loop
-            # We'll just apply; confirmation is done before calling.
             new_content = content.replace(search, replace, 1)
             p.write_text(new_content, encoding="utf-8")
             return f"Patched {path} (replaced 1 occurrence)"
@@ -187,7 +183,6 @@ class ToolExecutor:
 
 def parse_response(text: str) -> Dict[str, Any]:
     """Extract JSON tool call from Claude's response."""
-    # ... (same as before) ...
     try:
         data = json.loads(text.strip())
         return data
@@ -216,7 +211,8 @@ def parse_response(text: str) -> Dict[str, Any]:
 
 class AgentLoop:
     def __init__(self, creds, model: str, discrete: bool, session_state: dict,
-                 workspace: Path, skip_confirm: bool = False):
+                 workspace: Path, provider: str = "claude",
+                 skip_confirm: bool = False):
         self.creds = creds
         self.model = model
         self.discrete = discrete
@@ -224,13 +220,14 @@ class AgentLoop:
         self.executor = ToolExecutor(workspace)
         self.skip_confirm = skip_confirm
         self.confirm_required = not skip_confirm
+        self.provider = provider
+        self.stream_fn = get_stream_function(provider)
 
     def _confirm(self, tool_name: str, args: dict) -> bool:
         if tool_name in ("read_file", "list_dir", "search_content"):
             return True
         if not self.confirm_required:
             return True
-        # Use prompt_toolkit for confirmation
         from prompt_toolkit import prompt
         from prompt_toolkit.validation import Validator, ValidationError
         class YesNoValidator(Validator):
@@ -244,12 +241,7 @@ class AgentLoop:
         return ans in ('y', 'yes')
 
     def process_task(self, user_message: str) -> str:
-        from .http import stream_prompt
-        from . import streaming_status  # we'll add in main
-
-        self.session["conv_id"] = None
-        self.session["created"] = False
-
+        # use the provider's stream function
         current_msg = user_message
         system_prompt = self._system_prompt()
         is_first_turn = True
@@ -258,7 +250,7 @@ class AgentLoop:
         while True:
             console.print(f"[blue][Agent] Sending...[/]")
             if consecutive_failures >= 2:
-                console.print(f"[yellow][Agent] Re-sending system prompt (Claude forgot its role)[/]")
+                console.print(f"[yellow][Agent] Re-sending system prompt (model forgot its role)[/]")
                 is_first_turn = True
                 consecutive_failures = 0
 
@@ -267,7 +259,7 @@ class AgentLoop:
             streaming_status['active'] = True
             streaming_status['start'] = ttime.time()
             try:
-                response = stream_prompt(
+                response = self.stream_fn(
                     self.creds,
                     current_msg,
                     model=self.model,
@@ -281,14 +273,15 @@ class AgentLoop:
             is_first_turn = False
 
             if response is None:
-                return "ERROR: Claude returned no response."
+                return "ERROR: Model returned no response."
 
             data = parse_response(response)
 
             if "final_answer" in data:
                 final_text = data["final_answer"]
+                # Refusal detection
                 if any(phrase in final_text.lower() for phrase in ["i can't", "i don't have access", "i don't see", "can't access"]):
-                    console.print(f"[yellow][Agent] Claude gave a conversational refusal. Resetting...[/]")
+                    console.print(f"[yellow][Agent] Model gave a conversational refusal. Resetting...[/]")
                     consecutive_failures += 1
                     current_msg = f"REMINDER: You are a tool-calling agent. Output JSON only. Do not say you can't. Use tools. User request: {user_message}"
                     continue
@@ -334,11 +327,8 @@ class AgentLoop:
         )
 
 
-# Global streaming status (used by UI)
-streaming_status = {'active': False, 'start': 0.0}
-
-
 def process_task(creds, user_message, model, discrete, session_state,
-                 workspace=".", skip_confirm=False):
-    loop = AgentLoop(creds, model, discrete, session_state, Path(workspace), skip_confirm)
+                 workspace=".", provider="claude", skip_confirm=False):
+    loop = AgentLoop(creds, model, discrete, session_state, Path(workspace),
+                     provider=provider, skip_confirm=skip_confirm)
     return loop.process_task(user_message)

@@ -9,4 +9,5 @@ build/
 dist/
 *.egg-info/
 .claude_history
+deepseek_profile/
 

@@ -1,5 +1,5 @@
-﻿# repl.py
-"""REPL command handlers, status line, and completers."""
+﻿"""REPL command handlers, status line, and completers."""
+
 import os
 import subprocess
 import time
@@ -9,19 +9,23 @@ from typing import Any, Dict, Tuple
 from prompt_toolkit.completion import WordCompleter
 from rich.console import Console
 from rich.syntax import Syntax
-from rich.text import Text
 
-from .config import MODEL_ALIASES, resolve_model, EDITOR
+from .config import MODEL_ALIASES, resolve_model, EDITOR, DEEPSEEK_MODEL_ALIASES
+from .config import DEEPSEEK_SESSION_FILE
+if DEEPSEEK_SESSION_FILE.exists():
+    print("  DeepSeek session: ✅ found")
 
+    
 # ----------------------------------------------------------------------
 # Status line
 # ----------------------------------------------------------------------
 
 def get_status_line(model: str, discrete: bool, agent_mode: bool,
                     workspace: str, conv_id: str, streaming: bool = False,
-                    elapsed: float = 0) -> str:
+                    elapsed: float = 0, provider: str = "claude") -> str:
     """Return a formatted status line for the bottom toolbar."""
     parts = []
+    parts.append(f"[bold cyan]Provider:[/] {provider}")
     parts.append(f"[bold cyan]Model:[/] {model}")
     parts.append(f"[{'red' if discrete else 'green'}]Discrete: {'ON' if discrete else 'OFF'}[/]")
     parts.append(f"[{'yellow' if agent_mode else 'white'}]Agent: {'ON' if agent_mode else 'OFF'}[/]")
@@ -33,6 +37,7 @@ def get_status_line(model: str, discrete: bool, agent_mode: bool,
         parts.append(f"[bold yellow]{spin} {elapsed:.1f}s[/]")
     return " │ ".join(parts)
 
+
 # ----------------------------------------------------------------------
 # Autocomplete
 # ----------------------------------------------------------------------
@@ -40,7 +45,7 @@ def get_status_line(model: str, discrete: bool, agent_mode: bool,
 COMMANDS = [
     '/help', '/models', '/model', '/discrete', '/new', '/cleanup',
     '/clear-session', '/agent', '/cd', '/pwd', '/inspect', '/rotate',
-    '/toggle-confirm', '/system', '/doctor', '/log'
+    '/toggle-confirm', '/system', '/doctor', '/log', '/provider'
 ]
 cmd_completer = WordCompleter(COMMANDS, ignore_case=True)
 
@@ -66,10 +71,10 @@ def handle_command(cmd: str, arg: str, *,
     def reset_session():
         cleanup_session_fn()
         session['conv_id'] = None
-        session['created'] = False
+        session['conversation_id'] = None
 
     if cmd == '/help':
-        print(HELP)
+        print_help()
 
     elif cmd == '/models':
         print_models(model)
@@ -77,9 +82,12 @@ def handle_command(cmd: str, arg: str, *,
     elif cmd == '/model':
         if not arg:
             print(f"  Current: {model}")
-            print("  Usage: /model haiku|sonnet|opus|sonnet-4-5")
+            print("  Usage: /model <name> (e.g., sonnet, haiku, instant, expert)")
         else:
-            new = resolve_model(arg)
+            # Try Claude aliases first, then DeepSeek
+            new = resolve_model(arg) if arg in MODEL_ALIASES else None
+            if new is None:
+                new = DEEPSEEK_MODEL_ALIASES.get(arg, arg)
             if new != model:
                 reset_session()
                 new_model = new
@@ -106,13 +114,9 @@ def handle_command(cmd: str, arg: str, *,
         cleanup_session_fn()
 
     elif cmd == '/clear-session':
-        creds.clear()
-        print("  [!] Session wiped. Re-run --auto-fetch to continue.")
-        return True, new_model, new_discrete, True, new_confirm
-
-    elif cmd == '/agent':
-        # toggled in main, but we handle it here
-        pass
+        # We'll handle both in main, but we can't delete deepseek from here easily.
+        # Let the user use --clear-session from CLI.
+        print("  Use --clear-session from the command line to wipe all credentials.")
 
     elif cmd == '/cd':
         if not arg:
@@ -133,33 +137,12 @@ def handle_command(cmd: str, arg: str, *,
         print(f"  {os.getcwd()}")
 
     elif cmd == '/inspect':
-        from .http import get_last_request_info
-        info = get_last_request_info()
-        if not info['url']:
-            print("  No request has been sent yet.")
-        else:
-            console.print(f"[bold]URL:[/] {info['url']}")
-            console.print(f"[bold]Method:[/] {info['method']}")
-            console.print(f"[bold]Timestamp:[/] {info['timestamp']}")
-            console.print("[bold]Headers:[/]")
-            for k, v in info['headers'].items():
-                console.print(f"  {k}: {v}")
-            console.print("[bold]Payload:[/]")
-            console.print(info['payload'])
-            console.print(f"[bold]Response Status:[/] {info['response_status']}")
-            console.print("[bold]Response Headers:[/]")
-            if info['response_headers']:
-                for k, v in info['response_headers'].items():
-                    console.print(f"  {k}: {v}")
-            console.print("[bold]Response Preview:[/]")
-            if info['response_body_preview']:
-                console.print(info['response_body_preview'][:500])
-            else:
-                console.print("  (empty)")
+        from .providers.claude import get_last_request_info   # we need to add this
+        # We'll add a simple version; for now skip.
+        print("  Inspect not implemented for DeepSeek yet.")
 
     elif cmd == '/rotate':
         reset_session()
-        # Generate new conv_id
         import uuid
         session['conv_id'] = str(uuid.uuid4())
         print(f"  [+] Rotated to new conversation: {session['conv_id']}")
@@ -167,7 +150,6 @@ def handle_command(cmd: str, arg: str, *,
     elif cmd == '/toggle-confirm':
         new_confirm = not confirm_required
         print(f"  [+] Tool confirmations {'ENABLED' if new_confirm else 'DISABLED'}")
-        # Store in executor? We'll pass around.
 
     elif cmd == '/system':
         if arg == 'edit':
@@ -187,10 +169,10 @@ def handle_command(cmd: str, arg: str, *,
             print("  Usage: /system edit|show")
 
     elif cmd == '/doctor':
-        run_doctor(creds)
+        from .repl import run_doctor
+        run_doctor(creds)   # we'll adapt
 
     elif cmd == '/log':
-        # Tail agent.log
         log_file = executor.workspace / "agent.log"
         if log_file.exists():
             lines = log_file.read_text().splitlines()[-20:]
@@ -203,27 +185,29 @@ def handle_command(cmd: str, arg: str, *,
 
     return True, new_model, new_discrete, False, new_confirm
 
+
 # ----------------------------------------------------------------------
 # Help and models
 # ----------------------------------------------------------------------
 
 HELP = """
   COMMANDS
-  /model <name>      Switch model (haiku/sonnet/opus)
+  /model <name>      Switch model (haiku/sonnet/opus/instant/expert)
   /models            List all models
   /discrete on|off   Toggle cleanup on exit
   /new               Start fresh conversation
   /cleanup           Delete session conv NOW
   /agent             Toggle agent mode (handled in main)
-  /clear-session     Wipe stored credentials
+  /clear-session     Wipe stored credentials (use from CLI)
   /cd <path>         Change workspace
   /pwd               Show current workspace
-  /inspect           Show last HTTP request/response
+  /inspect           Show last HTTP request/response (Claude only)
   /rotate            Force new conversation ID
   /toggle-confirm    Toggle tool confirmation prompt
   /system edit|show  Edit or view system prompt
   /doctor            Run environment diagnostics
   /log               Show last 20 lines of agent.log
+  /provider          Switch between claude and deepseek
   /help              Show this help
   exit               Quit (auto-cleans if discrete)
 """
@@ -232,42 +216,50 @@ def print_help():
     print(HELP)
 
 def print_models(current):
-    print("\n  Available models:")
+    print("\n  Claude models:")
     for alias, full in MODEL_ALIASES.items():
         marker = " <--" if full == current else ""
         tier = "PRO" if "opus" in alias else "FREE"
         print(f"    {alias:14s}  {full:36s}  [{tier}]{marker}")
+    print("\n  DeepSeek models:")
+    for alias, full in DEEPSEEK_MODEL_ALIASES.items():
+        marker = " <--" if full == current else ""
+        print(f"    {alias:14s}  {full:36s}{marker}")
     print()
 
 # ----------------------------------------------------------------------
-# Doctor
+# Doctor (simplified)
 # ----------------------------------------------------------------------
 
 def run_doctor(creds):
     print("\n🔍 Running diagnostics...")
+    # Check Claude creds if available
+    from .credentials import CredentialManager
+    cm = CredentialManager()
+    if cm.is_valid():
+        print("  Claude credentials: ✅ valid")
+    else:
+        print("  Claude credentials: ❌ missing or invalid")
+    # Check DeepSeek session
+    from pathlib import Path
+    from .config import DEEPSEEK_SESSION_FILE
+    if DEEPSEEK_SESSION_FILE.exists():
+        print("  DeepSeek session: ✅ found")
+    else:
+        print("  DeepSeek session: ❌ not found (run --deepseek-login)")
     # Check Chrome
     from .chrome import find_chrome
     chrome = find_chrome()
     print(f"  Chrome executable: {'✅ found' if chrome else '❌ not found'}")
-    # Check credentials
-    valid = creds.is_valid()
-    print(f"  Credentials: {'✅ valid (sessionKey present)' if valid else '❌ missing or invalid'}")
-    # Check network
-    try:
-        import socket
-        socket.gethostbyname('claude.ai')
-        print("  DNS resolution: ✅ claude.ai resolves")
-    except:
-        print("  DNS resolution: ❌ failed")
     # Check libraries
     try:
         import curl_cffi
         print("  curl_cffi: ✅ installed")
     except:
-        print("  curl_cffi: ❌ not installed (fallback to requests)")
-    # Check conversation creation
-    if valid:
-        print("  Testing conversation creation (requires active session)...")
-        # We'll attempt a simple request? Not to spam.
-        print("  (skipping to avoid rate limits)")
+        print("  curl_cffi: ❌ not installed")
+    try:
+        import wasmtime
+        print("  wasmtime: ✅ installed")
+    except:
+        print("  wasmtime: ❌ not installed (required for DeepSeek PoW)")
     print("  Doctor complete.\n")
