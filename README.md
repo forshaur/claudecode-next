@@ -4,6 +4,11 @@
 
 This tool lets you use Claude as a coding assistant from your terminal – reading files, running commands, refactoring code – without needing an API key or paying per-token. It extracts your Claude.ai session from your browser once, then works entirely from the CLI and it's completely free.
 
+**Demo**
+
+<img width="400" height="225" alt="3Fr6DTzfquQ1cDfCx3If" src="https://github.com/user-attachments/assets/59b501e2-e115-4df4-aba7-3001bd8bc036" />
+
+
 ## What it does
 
 - Read/write files in your project
