@@ -24,6 +24,7 @@ if not HAS_CFFI and not std_requests:
 
 DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILE = os.path.join(DIR, "claude_profile")
+EDITOR = os.environ.get('EDITOR', 'nano')   # fallback
 
 if sys.platform == "win32":
     _CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "claude_re")

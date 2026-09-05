@@ -18,6 +18,20 @@ from .config import (
     DIR,
 )
 
+_last_request_info = {
+    'url': None,
+    'method': None,
+    'headers': None,
+    'payload': None,
+    'response_status': None,
+    'response_headers': None,
+    'response_body_preview': None,
+    'timestamp': None,
+}
+
+def get_last_request_info():
+    return _last_request_info
+
 
 def build_payload(prompt, model=DEFAULT_MODEL):
     """Build a fresh payload with new UUIDs."""
@@ -70,9 +84,10 @@ def _create_conversation(creds, conv_id, model):
         return False
 
 
-def _feed_sse_line(line, parts):
-    """Parse one SSE 'data: ...' line, appending any streamed text to parts.
-    Returns True if the stream is done (message_stop or [DONE])."""
+def _feed_sse_line(line, parts, quiet=False):
+    """Parse one SSE 'data: ...' line.
+    Returns True if the stream is done.
+    """
     line = line.strip()
     if not line.startswith("data: "):
         return False
@@ -89,8 +104,10 @@ def _feed_sse_line(line, parts):
         if delta.get("type") == "text_delta":
             txt = delta.get("text", "")
             parts.append(txt)
-            sys.stdout.write(txt)
-            sys.stdout.flush()
+            # 👇 Only write if quiet is False
+            if not quiet:
+                sys.stdout.write(txt)
+                sys.stdout.flush()
     elif t == "error":
         print(f"\n[!] {obj.get('error', {}).get('message', str(obj))}")
     elif t == "message_stop":
@@ -164,7 +181,7 @@ def stream_prompt(creds, prompt, model=DEFAULT_MODEL, discrete=True, session_sta
         buffer += text
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            if _feed_sse_line(line, parts):
+            if _feed_sse_line(line, parts, quiet=quiet):   # <-- added quiet
                 return
 
     resp = None
@@ -178,7 +195,7 @@ def stream_prompt(creds, prompt, model=DEFAULT_MODEL, discrete=True, session_sta
             resp = std_requests.post(endpoint, json=payload, headers=headers, timeout=120)
             if resp.status_code == 200:
                 for line in resp.text.split("\n"):
-                    if _feed_sse_line(line, parts):
+                    if _feed_sse_line(line, parts, quiet=quiet):
                         break
     except Exception as e:
         print(f"\n[!] Request error: {e}")
