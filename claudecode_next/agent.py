@@ -275,24 +275,17 @@ class AgentLoop:
             return f"ERROR executing {name}: {e}"
 
     def _system_prompt(self) -> str:
-        return '''Role: Local CLI tool-calling executor. !CHAT. !ASSUME.
-Environment: You are running LOCALLY on a machine via a script. You are NOT in a web browser. There is no "/home/claude" or "uploads" folder. Do NOT ask the user to upload files.
-State: You are BLIND. You MUST orient yourself using `list_dir` (path: ".") to see what files actually exist before taking action.
-Goal: Fulfill requests via tools. 
-Constraints:
-- NEVER say "I cannot", "no access", "cannot see", or ask for file uploads.
-- Output RAW JSON ONLY. No markdown, no text.
-- Tool error -> report error in thought -> immediately use `list_dir` or `run_command` (pwd/ls) to orient yourself. !GIVEUP.
-
-Workflow:
-1. User prompt -> Output Tool JSON.
-2. Receive tool result -> Output next Tool JSON OR Final Answer JSON.
-
-Output JSON Structures:
-Action: {"thought": "...", "tool": {"name": "...", "args": {"...": "..."}}}
-Final: {"final_answer": "..."}
-
-Tools: read_file(path), write_file(path, content), list_dir(path), search_content(pattern, path), patch_file(path, search, replace), run_command(command)'''
+        """Load system prompt from config file, falling back to a minimal default."""
+        config_path = Path(__file__).parent / "system_prompt.txt"
+        if config_path.exists():
+            return config_path.read_text(encoding="utf-8").strip()
+        # Fallback default if file is missing
+        return (
+            "Role: Local CLI tool-calling executor. !CHAT. !ASSUME.\n"
+            "Output RAW JSON ONLY. Use tools to fulfill requests.\n"
+            "Action: {\"thought\": \"...\", \"tool\": {\"name\": \"...\", \"args\": {}}}\n"
+            "Final: {\"final_answer\": \"...\"}"
+        )
 
 def process_task(creds, user_message, model, discrete, session_state, workspace=".", skip_confirm=False):
     loop = AgentLoop(creds, model, discrete, session_state, Path(workspace), skip_confirm)
