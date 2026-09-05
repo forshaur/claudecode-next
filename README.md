@@ -6,7 +6,11 @@ This tool lets you use Claude as a coding assistant from your terminal – readi
 
 **Demo**
 
-<img width="400" height="225" alt="3Fr6DTzfquQ1cDfCx3If" src="https://github.com/user-attachments/assets/59b501e2-e115-4df4-aba7-3001bd8bc036" />
+
+
+https://github.com/user-attachments/assets/f690f6cd-2f60-4755-83b5-9110b93d3147
+
+
 
 
 ## What it does
