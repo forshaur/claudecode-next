@@ -6,7 +6,7 @@ Architecture: Capture creds once → Replay via CLI (no browser during prompts).
 v4: Dynamic timezone, secure CDP (localhost-only), encrypted credential path.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = [
     "CredentialManager",
     "stream_prompt",

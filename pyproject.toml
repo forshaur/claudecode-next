@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claudecode-next"
-version = "1.0.0"
+version = "1.0.1"
 authors = [
     { name = "Shaurya Mishra", email = "shaur.codes@gmail.com" },
 ]
