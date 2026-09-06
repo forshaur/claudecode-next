@@ -8,7 +8,7 @@ import time
 import difflib
 import threading
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from rich.console import Console
 from rich.syntax import Syntax
@@ -203,12 +203,12 @@ class ToolExecutor:
 
 
 # =============================================================================
-#  ROBUST JSON EXTRACTOR – handles nested braces, strings, markdown fences
+#  SUPER‑LENIENT PARSER – handles malformed JSON, missing braces, etc.
 # =============================================================================
 def parse_response(text: str) -> Dict[str, Any]:
-    """Extract JSON tool call from model response, robustly."""
-    # 1. Remove Markdown code fences (```json ... ```)
-    text = re.sub(r"```(?:json)?\s*|\s*```", "", text, flags=re.DOTALL).strip()
+    """Extract JSON tool call from model response, even if malformed."""
+    # 1. Remove Markdown code fences
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", text, flags=re.DOTALL).strip()
 
     def try_parse(candidate):
         try:
@@ -220,12 +220,7 @@ def parse_response(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             return None
 
-    # 2. Direct parse
-    data = try_parse(text)
-    if data:
-        return data
-
-    # 3. Stack-based scanner – finds the first complete JSON object
+    # 2. Try to parse a complete JSON object (stack scanner)
     def find_json(s):
         stack = []
         in_string = False
@@ -256,12 +251,43 @@ def parse_response(text: str) -> Dict[str, Any]:
                             return data
         return None
 
-    data = find_json(text)
+    data = find_json(cleaned)
     if data:
         return data
 
-    # 4. Fallback: treat whole text as final answer
-    return {"final_answer": text.strip()}
+    # 3. FALLBACK: use regex to find a tool call even without outer braces
+    # Pattern: "tool": { "name": "something", "args": { ... } }
+    tool_pattern = re.compile(
+        r'"tool"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"args"\s*:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
+        re.DOTALL
+    )
+    match = tool_pattern.search(cleaned)
+    if match:
+        name = match.group(1)
+        args_str = match.group(2)
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        # Also try to extract "thought"
+        thought_match = re.search(r'"thought"\s*:\s*"([^"]*)"', cleaned)
+        thought = thought_match.group(1) if thought_match else ""
+        return {
+            "thought": thought,
+            "tool": {"name": name, "args": args}
+        }
+
+    # 4. One more try: if the text contains a command with run_command, build it
+    cmd_pattern = re.compile(r'"name"\s*:\s*"run_command".*?"command"\s*:\s*"([^"]+)"')
+    cmd_match = cmd_pattern.search(cleaned)
+    if cmd_match:
+        command = cmd_match.group(1)
+        return {
+            "tool": {"name": "run_command", "args": {"command": command}}
+        }
+
+    # 5. Last resort: treat whole text as final answer
+    return {"final_answer": cleaned.strip()}
 
 
 class AgentLoop:
@@ -284,7 +310,6 @@ class AgentLoop:
         if not self.confirm_required:
             return True
 
-        # Show diff preview for write/patch
         preview = ""
         if tool_name in ("write_file", "patch_file"):
             preview = self.executor._preview_diff(tool_name, args)
@@ -362,7 +387,7 @@ class AgentLoop:
 
             data = parse_response(response)
 
-            # ----- SAFETY: If final_answer itself looks like a tool call, re-parse -----
+            # SAFETY: If final_answer itself contains a tool call, re-parse
             if "final_answer" in data:
                 maybe_tool = parse_response(data["final_answer"])
                 if "tool" in maybe_tool:
@@ -375,7 +400,6 @@ class AgentLoop:
                     final_text = final_text.replace('\\n', '\n')
                     if final_text.startswith('"') and final_text.endswith('"'):
                         final_text = final_text[1:-1]
-                    # one more attempt to unwrap nested JSON
                     nested = parse_response(final_text)
                     if "final_answer" in nested and nested["final_answer"] != final_text:
                         final_text = nested["final_answer"]
