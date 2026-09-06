@@ -28,15 +28,26 @@ def stream_prompt(creds, prompt, model, discrete, session_state,
     client = DeepSeekClient(session=creds, allow_interactive=False)
     try:
         conversation_id = session_state.get('conversation_id')
-        # Pass system_prompt as a separate 'system' parameter to the client
-        stream = client.stream(
-            prompt,
-            conversation_id=conversation_id,
-            model=model,
-            thinking=thinking,
-            search=search,
-            system=system_prompt,   # <-- this is new
-        )
+
+        # Only pass 'model' if there is no existing conversation
+        if conversation_id is None:
+            # First turn – model is required
+            stream = client.stream(
+                prompt,
+                model=model,
+                thinking=thinking,
+                search=search,
+                system=system_prompt,
+            )
+        else:
+            # Subsequent turns – do NOT pass model (thread already has it)
+            stream = client.stream(
+                prompt,
+                conversation_id=conversation_id,
+                thinking=thinking,
+                search=search,
+                system=system_prompt,
+            )
 
         full_text = ""
         for chunk in stream:
