@@ -3,66 +3,82 @@
 import os
 import subprocess
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import FormattedText
 from rich.console import Console
 from rich.syntax import Syntax
 
-from .config import MODEL_ALIASES, resolve_model, EDITOR, DEEPSEEK_MODEL_ALIASES
-from .config import DEEPSEEK_SESSION_FILE
-if DEEPSEEK_SESSION_FILE.exists():
-    print("  DeepSeek session: ✅ found")
+from .config import (
+    MODEL_ALIASES,
+    resolve_model,
+    EDITOR,
+    DEEPSEEK_MODEL_ALIASES,
+    DEEPSEEK_MODEL_DISPLAY,
+)
 
-    
-# ----------------------------------------------------------------------
-# Status line
-# ----------------------------------------------------------------------
+# ---- Global streaming status (shared with main) ----
+streaming_status = {'active': False, 'start': 0.0}
+_app_ref = None  # will be set by main to allow invalidate
 
+def set_app_ref(app):
+    global _app_ref
+    _app_ref = app
+
+# ---- Status line with FormattedText (proper colors) ----
 def get_status_line(model: str, discrete: bool, agent_mode: bool,
                     workspace: str, conv_id: str, streaming: bool = False,
-                    elapsed: float = 0, provider: str = "claude") -> str:
-    """Return a formatted status line for the bottom toolbar."""
-    parts = []
-    parts.append(f"[bold cyan]Provider:[/] {provider}")
-    parts.append(f"[bold cyan]Model:[/] {model}")
-    parts.append(f"[{'red' if discrete else 'green'}]Discrete: {'ON' if discrete else 'OFF'}[/]")
-    parts.append(f"[{'yellow' if agent_mode else 'white'}]Agent: {'ON' if agent_mode else 'OFF'}[/]")
-    parts.append(f"[magenta]Workspace:[/] {workspace}")
+                    elapsed: float = 0, provider: str = "claude",
+                    thinking: bool = False, search: bool = False):
+    """Return a FormattedText for the bottom toolbar."""
+    items = []
+    items.append(('bold cyan', f'Provider: {provider}'))
+    items.append(('', ' │ '))
+    items.append(('bold cyan', f'Model: {model}'))
+    items.append(('', ' │ '))
+
+    if provider == "deepseek":
+        # Show DeepSeek toggles
+        items.append(('cyan', f'Think: {"ON" if thinking else "OFF"}'))
+        items.append(('', ' │ '))
+        items.append(('cyan', f'Search: {"ON" if search else "OFF"}'))
+        items.append(('', ' │ '))
+    else:
+        # Claude discrete mode
+        color = 'red' if discrete else 'green'
+        items.append((color, f'Discrete: {"ON" if discrete else "OFF"}'))
+        items.append(('', ' │ '))
+
+    items.append(('yellow' if agent_mode else 'white', f'Agent: {"ON" if agent_mode else "OFF"}'))
+    items.append(('', ' │ '))
+    items.append(('magenta', f'Workspace: {workspace}'))
     if conv_id:
-        parts.append(f"[dim]Conv: {conv_id[:8]}…[/]")
+        items.append(('', ' │ '))
+        items.append(('dim', f'Conv: {conv_id[:8]}…'))
     if streaming:
         spin = "⣾⣽⣻⢿⡿⣟⣯⣷"[int(elapsed * 10) % 8] if elapsed else "⣾"
-        parts.append(f"[bold yellow]{spin} {elapsed:.1f}s[/]")
-    return " │ ".join(parts)
+        items.append(('', ' │ '))
+        items.append(('bold yellow', f'{spin} {elapsed:.1f}s'))
+    return FormattedText(items)
 
-
-# ----------------------------------------------------------------------
-# Autocomplete
-# ----------------------------------------------------------------------
-
+# ---- Autocomplete ----
 COMMANDS = [
     '/help', '/models', '/model', '/discrete', '/new', '/cleanup',
     '/clear-session', '/agent', '/cd', '/pwd', '/inspect', '/rotate',
-    '/toggle-confirm', '/system', '/doctor', '/log', '/provider'
+    '/toggle-confirm', '/system', '/doctor', '/log', '/provider',
+    '/think', '/search',
 ]
 cmd_completer = WordCompleter(COMMANDS, ignore_case=True)
 
-# ----------------------------------------------------------------------
-# Command handlers
-# ----------------------------------------------------------------------
-
+# ---- Command handlers ----
 def handle_command(cmd: str, arg: str, *,
                    model: str, discrete: bool, session: dict,
                    creds, cleanup_session_fn, executor,
-                   confirm_required: bool) -> Tuple[bool, str, bool, bool, bool]:
-    """
-    Process a command.
-
-    Returns:
-        (should_continue, new_model, new_discrete, should_break, new_confirm_required)
-    """
+                   confirm_required: bool,
+                   provider: str = "claude") -> Tuple[bool, str, bool, bool, bool]:
     console = Console()
     new_model = model
     new_discrete = discrete
@@ -77,7 +93,7 @@ def handle_command(cmd: str, arg: str, *,
         print_help()
 
     elif cmd == '/models':
-        print_models(model)
+        print_models(model, provider)
 
     elif cmd == '/model':
         if not arg:
@@ -96,26 +112,30 @@ def handle_command(cmd: str, arg: str, *,
                 print(f"  [+] Already on {model}")
 
     elif cmd == '/discrete':
-        if arg.lower() in ('on', '1', 'true'):
-            new_discrete = True
-            print("  [+] discrete ON (cleanup on exit)")
-        elif arg.lower() in ('off', '0', 'false'):
-            new_discrete = False
-            print("  [+] discrete OFF (conversations kept)")
+        if provider == "deepseek":
+            print("  [!] discrete mode is not supported for DeepSeek")
         else:
-            print(f"  discrete: {'ON' if discrete else 'OFF'}")
-            print("  Usage: /discrete on|off")
+            if arg.lower() in ('on', '1', 'true'):
+                new_discrete = True
+                print("  [+] discrete ON (cleanup on exit)")
+            elif arg.lower() in ('off', '0', 'false'):
+                new_discrete = False
+                print("  [+] discrete OFF (conversations kept)")
+            else:
+                print(f"  discrete: {'ON' if discrete else 'OFF'}")
+                print("  Usage: /discrete on|off")
 
     elif cmd == '/new':
         reset_session()
         print("  [+] Fresh conversation (next prompt starts new)")
 
     elif cmd == '/cleanup':
-        cleanup_session_fn()
+        if provider == "deepseek":
+            print("  [!] cleanup is not needed for DeepSeek (conversations persist)")
+        else:
+            cleanup_session_fn()
 
     elif cmd == '/clear-session':
-        # We'll handle both in main, but we can't delete deepseek from here easily.
-        # Let the user use --clear-session from CLI.
         print("  Use --clear-session from the command line to wipe all credentials.")
 
     elif cmd == '/cd':
@@ -137,8 +157,6 @@ def handle_command(cmd: str, arg: str, *,
         print(f"  {os.getcwd()}")
 
     elif cmd == '/inspect':
-        from .providers.claude import get_last_request_info   # we need to add this
-        # We'll add a simple version; for now skip.
         print("  Inspect not implemented for DeepSeek yet.")
 
     elif cmd == '/rotate':
@@ -170,7 +188,7 @@ def handle_command(cmd: str, arg: str, *,
 
     elif cmd == '/doctor':
         from .repl import run_doctor
-        run_doctor(creds)   # we'll adapt
+        run_doctor(creds)
 
     elif cmd == '/log':
         log_file = executor.workspace / "agent.log"
@@ -180,23 +198,44 @@ def handle_command(cmd: str, arg: str, *,
         else:
             print("  No agent.log found in workspace.")
 
+    # ----- DeepSeek toggles -----
+    elif cmd == '/think':
+        if arg.lower() in ('on', '1', 'true'):
+            session['thinking_enabled'] = True
+            print("  [+] DeepThink ENABLED (next prompts will show reasoning)")
+        elif arg.lower() in ('off', '0', 'false'):
+            session['thinking_enabled'] = False
+            print("  [+] DeepThink DISABLED")
+        else:
+            current = session.get('thinking_enabled', False)
+            print(f"  DeepThink is {'ON' if current else 'OFF'}")
+            print("  Usage: /think on|off")
+
+    elif cmd == '/search':
+        if arg.lower() in ('on', '1', 'true'):
+            session['search_enabled'] = True
+            print("  [+] Web Search ENABLED (will fetch online information)")
+        elif arg.lower() in ('off', '0', 'false'):
+            session['search_enabled'] = False
+            print("  [+] Web Search DISABLED")
+        else:
+            current = session.get('search_enabled', False)
+            print(f"  Web Search is {'ON' if current else 'OFF'}")
+            print("  Usage: /search on|off")
+
     else:
         print(f"  [!] Unknown command: {cmd}. Try /help")
 
     return True, new_model, new_discrete, False, new_confirm
 
-
-# ----------------------------------------------------------------------
-# Help and models
-# ----------------------------------------------------------------------
-
+# ---- Help and models ----
 HELP = """
   COMMANDS
   /model <name>      Switch model (haiku/sonnet/opus/instant/expert)
   /models            List all models
-  /discrete on|off   Toggle cleanup on exit
+  /discrete on|off   Toggle cleanup on exit (Claude only)
   /new               Start fresh conversation
-  /cleanup           Delete session conv NOW
+  /cleanup           Delete session conv NOW (Claude only)
   /agent             Toggle agent mode (handled in main)
   /clear-session     Wipe stored credentials (use from CLI)
   /cd <path>         Change workspace
@@ -208,6 +247,8 @@ HELP = """
   /doctor            Run environment diagnostics
   /log               Show last 20 lines of agent.log
   /provider          Switch between claude and deepseek
+  /think on|off      Toggle DeepSeek DeepThink (reasoning)
+  /search on|off     Toggle DeepSeek web search
   /help              Show this help
   exit               Quit (auto-cleans if discrete)
 """
@@ -215,43 +256,43 @@ HELP = """
 def print_help():
     print(HELP)
 
-def print_models(current):
-    print("\n  Claude models:")
-    for alias, full in MODEL_ALIASES.items():
-        marker = " <--" if full == current else ""
-        tier = "PRO" if "opus" in alias else "FREE"
-        print(f"    {alias:14s}  {full:36s}  [{tier}]{marker}")
-    print("\n  DeepSeek models:")
-    for alias, full in DEEPSEEK_MODEL_ALIASES.items():
-        marker = " <--" if full == current else ""
-        print(f"    {alias:14s}  {full:36s}{marker}")
+def print_models(current, provider="claude"):
+    if provider == "claude":
+        print("\n  Claude models:")
+        for alias, full in MODEL_ALIASES.items():
+            marker = " <--" if full == current else ""
+            tier = "PRO" if "opus" in alias else "FREE"
+            print(f"    {alias:14s}  {full:36s}  [{tier}]{marker}")
+    else:
+        print("\n  DeepSeek models (API values):")
+        # Show unique API models
+        api_models = set(DEEPSEEK_MODEL_ALIASES.values())
+        for api_model in sorted(api_models):
+            display = DEEPSEEK_MODEL_DISPLAY.get(api_model, api_model)
+            marker = " <--" if api_model == current else ""
+            aliases = [k for k, v in DEEPSEEK_MODEL_ALIASES.items() if v == api_model]
+            alias_str = f" (aliases: {', '.join(aliases)})" if len(aliases) > 1 else ""
+            print(f"    {display:36s}  [{api_model}]{alias_str}{marker}")
     print()
 
-# ----------------------------------------------------------------------
-# Doctor (simplified)
-# ----------------------------------------------------------------------
-
+# ---- Doctor ----
 def run_doctor(creds):
     print("\n🔍 Running diagnostics...")
-    # Check Claude creds if available
     from .credentials import CredentialManager
     cm = CredentialManager()
     if cm.is_valid():
         print("  Claude credentials: ✅ valid")
     else:
         print("  Claude credentials: ❌ missing or invalid")
-    # Check DeepSeek session
     from pathlib import Path
     from .config import DEEPSEEK_SESSION_FILE
     if DEEPSEEK_SESSION_FILE.exists():
         print("  DeepSeek session: ✅ found")
     else:
         print("  DeepSeek session: ❌ not found (run --deepseek-login)")
-    # Check Chrome
     from .chrome import find_chrome
     chrome = find_chrome()
     print(f"  Chrome executable: {'✅ found' if chrome else '❌ not found'}")
-    # Check libraries
     try:
         import curl_cffi
         print("  curl_cffi: ✅ installed")

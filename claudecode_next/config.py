@@ -58,12 +58,18 @@ def resolve_model(name):
         return MODEL_ALIASES[name]
     return name
 
-# ---- DeepSeek Aliases ----
+# ---- DeepSeek Aliases & Display Names ----
 DEEPSEEK_MODEL_ALIASES = {
     "instant": "default",
     "expert": "expert",
     "deepseek": "default",
     "default": "default",
+}
+
+# Display names shown in /models
+DEEPSEEK_MODEL_DISPLAY = {
+    "default": "Instant (fast)",
+    "expert": "Expert (powerful)",
 }
 
 DEFAULT_PROVIDER = "claude"

@@ -22,11 +22,12 @@ RESET = "\033[0m"
 
 console = Console()
 
-# ---- Global streaming status (for UI) ----
-streaming_status = {'active': False, 'start': 0.0}
-
 # Import provider abstraction
 from .providers import get_stream_function
+
+# Global streaming status (shared with main)
+streaming_status = {'active': False, 'start': 0.0}
+
 
 class ToolExecutor:
     """Executes file/command tools restricted to a workspace."""
@@ -53,7 +54,6 @@ class ToolExecutor:
             return f"ERROR: file not found: {path}"
         try:
             content = p.read_text(encoding="utf-8-sig")
-            # Syntax highlight
             ext = p.suffix.lstrip('.') or 'txt'
             syntax = Syntax(content, ext, theme="monokai", line_numbers=True)
             from io import StringIO
@@ -182,32 +182,74 @@ class ToolExecutor:
 
 
 def parse_response(text: str) -> Dict[str, Any]:
-    """Extract JSON tool call from Claude's response."""
-    try:
-        data = json.loads(text.strip())
-        return data
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
+    """Extract JSON tool call from model response, robustly."""
+    # Helper: try to parse a candidate string as JSON
+    def try_parse(candidate):
         try:
-            return json.loads(match.group(1))
+            data = json.loads(candidate)
+            # If it has _answer, rename to final_answer
+            if '_answer' in data and 'final_answer' not in data:
+                data['final_answer'] = data.pop('_answer')
+            if 'tool' in data or 'final_answer' in data:
+                return data
+            if 'name' in data and 'args' in data:
+                return {'tool': data}
         except json.JSONDecodeError:
-            pass
+            return None
+
+    # 1. Try full text
+    data = try_parse(text.strip())
+    if data:
+        return data
+
+    # 2. Scan for JSON objects using brace counting, but collect all and pick the one with relevant keys
+    candidates = []
+    start = text.find('{')
+    while start != -1:
+        brace_count = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[start:], start):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+            if not in_string:
+                if ch == '{':
+                    brace_count += 1
+                elif ch == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        candidate = text[start:i+1]
+                        data = try_parse(candidate)
+                        if data:
+                            candidates.append(data)
+                        start = text.find('{', i+1)
+                        break
+        else:
+            break
+
+    # If we have candidates, pick the one with 'tool' first, then 'final_answer'
+    for data in candidates:
+        if 'tool' in data:
+            return data
+    for data in candidates:
+        if 'final_answer' in data:
+            return data
+
+    # 3. Fallback: greedy regex for JSON
     match = re.search(r"(\{.*\})", text, re.DOTALL)
     if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-    stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            return json.loads(stripped)
-        except:
-            pass
-    return {"final_answer": text}
+        data = try_parse(match.group(1))
+        if data:
+            return data
 
+    # 4. Final fallback: treat whole text as final answer
+    return {"final_answer": text.strip()}
 
 class AgentLoop:
     def __init__(self, creds, model: str, discrete: bool, session_state: dict,
@@ -241,7 +283,6 @@ class AgentLoop:
         return ans in ('y', 'yes')
 
     def process_task(self, user_message: str) -> str:
-        # use the provider's stream function
         current_msg = user_message
         system_prompt = self._system_prompt()
         is_first_turn = True
@@ -254,7 +295,6 @@ class AgentLoop:
                 is_first_turn = True
                 consecutive_failures = 0
 
-            # Set streaming status for UI
             import time as ttime
             streaming_status['active'] = True
             streaming_status['start'] = ttime.time()
@@ -279,6 +319,12 @@ class AgentLoop:
 
             if "final_answer" in data:
                 final_text = data["final_answer"]
+                # If the final_text contains JSON-like structure, try to re-parse it
+                # (sometimes model outputs nested JSON)
+                if isinstance(final_text, str):
+                    nested = parse_response(final_text)
+                    if "final_answer" in nested and nested["final_answer"] != final_text:
+                        final_text = nested["final_answer"]
                 # Refusal detection
                 if any(phrase in final_text.lower() for phrase in ["i can't", "i don't have access", "i don't see", "can't access"]):
                     console.print(f"[yellow][Agent] Model gave a conversational refusal. Resetting...[/]")

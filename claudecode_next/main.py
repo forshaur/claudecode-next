@@ -7,7 +7,9 @@ import sys
 import time
 import uuid
 from pathlib import Path
-
+import threading
+from prompt_toolkit.shortcuts import PromptSession
+from prompt_toolkit.application import get_app
 # UTF‑8 reconfiguration for Windows
 if sys.platform == "win32":
     try:
@@ -34,12 +36,13 @@ from .config import (
     DEEPSEEK_SESSION_FILE,
     DEEPSEEK_PROFILE_DIR,
     DEFAULT_PROVIDER,
+    DEEPSEEK_MODEL_ALIASES,
 )
 from .credentials import CredentialManager
 from .providers.claude import stream_prompt as claude_stream, _delete_conversation
 from .providers.deepseek import stream_prompt as deepseek_stream
 from .providers import get_stream_function
-from .deepseek import login as deepseek_login, get_session as deepseek_get_session
+from .deepseek import login as deepseek_login, get_session as deepseek_get_session, Session as DeepSeekSession
 from .chrome import do_login
 from .repl import (
     get_status_line,
@@ -52,7 +55,6 @@ from .agent import process_task, streaming_status
 
 console = Console()
 
-
 # ----------------------------------------------------------------------
 # Cleanup helper (Claude-specific)
 # ----------------------------------------------------------------------
@@ -64,7 +66,6 @@ def _cleanup_session(creds, session, discrete):
         console.print("[+] Session cleaned (invisible in browser)")
         session["conv_id"] = None
         session["created"] = False
-
 
 # ----------------------------------------------------------------------
 # Main
@@ -145,56 +146,65 @@ def main():
         claude_creds._parse_cookies(args.cookie)
         claude_creds.save()
     elif not claude_creds.load():
-        console.print("[!] No Claude credentials. Use --manual, --auto-fetch, or --login")
-        # If provider is deepseek, we might not need Claude creds.
-        if args.provider == "deepseek":
-            console.print("[*] Provider set to deepseek – Claude credentials not required.")
-        else:
+        # Only warn if provider is claude, else silent
+        if args.provider == "claude":
+            console.print("[!] No Claude credentials. Use --manual, --auto-fetch, or --login")
             return
+        else:
+            # Provider is deepseek – just note it
+            console.print("[*] Provider set to deepseek – Claude credentials not required.")
 
     # DeepSeek session: load or create
     deepseek_session = None
     if args.provider == "deepseek":
         try:
-            deepseek_session = deepseek_get_session(
-                profile_dir=DEEPSEEK_PROFILE_DIR,
-                session_file=DEEPSEEK_SESSION_FILE,
-                allow_interactive=False
-            )
+            deepseek_session = deepseek_get_session(allow_interactive=False)
         except Exception as e:
             console.print(f"[!] DeepSeek session not found or invalid. Run --deepseek-login first.")
             return
 
-    # Validate credentials for the chosen provider
+    # Validate Claude credentials if provider is claude
     if args.provider == "claude" and not claude_creds.is_valid():
         console.print("[!] Invalid Claude credentials")
         return
 
     # ── State ──────────────────────────────────────────────────────────────────
-    # Resolve model name (Claude only; DeepSeek aliases are resolved inside the provider)
-    model = resolve_model(args.model) if args.provider == "claude" else args.model
+    provider = args.provider
+    if provider == "claude":
+        model = resolve_model(args.model)
+    else:  # deepseek
+        # Resolve model: if user passed a non-default, use it, else default
+        if args.model != "sonnet" or args.model in DEEPSEEK_MODEL_ALIASES:
+            model = DEEPSEEK_MODEL_ALIASES.get(args.model, "default")
+        else:
+            model = "default"
+
     discrete = not args.no_discrete
     agent_mode = False
     confirm_required = not args.dangerously_skip_permissions
-    provider = args.provider
 
     # Session state (Claude: conv_id; DeepSeek: conversation_id)
-    session = {"conv_id": None, "created": False, "conversation_id": None}
+    session = {
+        "conv_id": None,
+        "created": False,
+        "conversation_id": None,
+        "thinking_enabled": False,
+        "search_enabled": False,
+    }
     if provider == "deepseek":
         session["conv_id"] = None   # unused
 
     workspace = Path(args.workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # ── Information display ────────────────────────────────────────────────────
-    if provider == "claude":
-        lib = "curl_cffi" if HAS_CFFI else "requests"
-        creds_path = str(CRED_FILE)
-        discrete_label = "discrete" if discrete else "visible"
-    else:  # deepseek
-        lib = "httpx"
-        creds_path = str(DEEPSEEK_SESSION_FILE)
+    lib = "curl_cffi" if HAS_CFFI else "requests"
+    if provider == "deepseek":
+        lib = "httpx (DeepSeek)"
         discrete_label = "N/A (DeepSeek keeps conversations)"
+        creds_path = str(DEEPSEEK_SESSION_FILE)
+    else:
+        discrete_label = "discrete" if discrete else "visible"
+        creds_path = str(CRED_FILE)
 
     console.print(f"[+] provider: {provider}")
     console.print(f"[+] model:    {model}")
@@ -204,6 +214,8 @@ def main():
     console.print(f"[+] creds:    {creds_path}")
     console.print(f"[+] Type /help for commands")
     console.print(f"[+] Agent mode: /agent to toggle (workspace: {workspace})")
+    if provider == "deepseek":
+        console.print("[+] DeepSeek toggles: /think on|off, /search on|off")
     console.print()
 
     # ── Single / batch / jailbreak mode ──────────────────────────────────────
@@ -283,8 +295,21 @@ def main():
             streaming=streaming_status['active'],
             elapsed=time.time() - streaming_status['start'] if streaming_status['active'] else 0,
             provider=provider,
+            thinking=session.get('thinking_enabled', False),
+            search=session.get('search_enabled', False),
         )
     )
+
+    def update_toolbar():
+        while True:
+            time.sleep(0.5)
+            try:
+                app = get_app()
+                if app and streaming_status['active']:
+                    app.invalidate()
+            except:
+                pass
+    threading.Thread(target=update_toolbar, daemon=True).start()
 
     try:
         while True:
@@ -320,17 +345,15 @@ def main():
                     continue
                 # Switch provider
                 if new_provider == 'deepseek':
-                    # Ensure deepseek session exists
                     try:
-                        ds = deepseek_get_session(
-                            profile_dir=DEEPSEEK_PROFILE_DIR,
-                            session_file=DEEPSEEK_SESSION_FILE,
-                            allow_interactive=False
-                        )
+                        ds = deepseek_get_session(allow_interactive=False)
                         deepseek_session = ds
                         provider = 'deepseek'
+                        model = "default"
                         session['conv_id'] = None
                         session['conversation_id'] = None
+                        session['thinking_enabled'] = False
+                        session['search_enabled'] = False
                         console.print("[+] Switched to DeepSeek")
                     except Exception as e:
                         console.print(f"[!] DeepSeek session not available. Run --deepseek-login first.")
@@ -340,6 +363,7 @@ def main():
                         console.print("[!] Claude credentials invalid. Use --auto-fetch or --manual.")
                     else:
                         provider = 'claude'
+                        model = "sonnet"
                         session['conv_id'] = None
                         session['conversation_id'] = None
                         console.print("[+] Switched to Claude")
@@ -363,6 +387,7 @@ def main():
                     cleanup_session_fn=lambda: _cleanup_session(claude_creds, session, discrete),
                     executor=temp_executor,
                     confirm_required=confirm_required,
+                    provider=provider,
                 )
                 model = new_model
                 discrete = new_discrete
@@ -399,7 +424,6 @@ def main():
     finally:
         if provider == "claude":
             _cleanup_session(claude_creds, session, discrete)
-
 
 if __name__ == "__main__":
     main()
