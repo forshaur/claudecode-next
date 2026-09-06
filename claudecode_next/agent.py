@@ -131,8 +131,6 @@ class ToolExecutor:
             return f"ERROR patching {path}: {e}"
 
     def run_command(self, command: str, stream_output: bool = True) -> str:
-        # Security warning: shell=True is risky; we trust the user confirmation.
-        # In a production setting, implement a whitelist or use shell=False.
         try:
             proc = subprocess.Popen(
                 command,
@@ -172,9 +170,8 @@ class ToolExecutor:
         with self.log_file.open("a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {action} {detail}\n")
 
-    # ----- Helper for diff preview (used by confirm) -----
     def _preview_diff(self, tool_name: str, args: dict) -> str:
-        """Generate a unified diff preview for write/patch operations without executing them."""
+        """Generate unified diff preview for write/patch without executing."""
         path = args.get("path")
         if not path:
             return ""
@@ -205,9 +202,12 @@ class ToolExecutor:
             return f"Error generating diff: {e}"
 
 
+# =============================================================================
+#  ROBUST JSON EXTRACTOR – handles nested braces, strings, markdown fences
+# =============================================================================
 def parse_response(text: str) -> Dict[str, Any]:
     """Extract JSON tool call from model response, robustly."""
-    # 1. Strip Markdown code fences
+    # 1. Remove Markdown code fences (```json ... ```)
     text = re.sub(r"```(?:json)?\s*|\s*```", "", text, flags=re.DOTALL).strip()
 
     def try_parse(candidate):
@@ -220,18 +220,18 @@ def parse_response(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             return None
 
-    # 2. Try direct parse
+    # 2. Direct parse
     data = try_parse(text)
     if data:
         return data
 
-    # 3. Scan for balanced JSON objects (handles nested braces and strings)
-    start = text.find('{')
-    while start != -1:
-        brace_count = 0
+    # 3. Stack-based scanner – finds the first complete JSON object
+    def find_json(s):
+        stack = []
         in_string = False
         escape = False
-        for i, ch in enumerate(text[start:], start):
+        start = None
+        for i, ch in enumerate(s):
             if escape:
                 escape = False
                 continue
@@ -240,28 +240,27 @@ def parse_response(text: str) -> Dict[str, Any]:
                 continue
             if ch == '"' and not escape:
                 in_string = not in_string
-            if not in_string:
-                if ch == '{':
-                    brace_count += 1
-                elif ch == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        candidate = text[start:i+1]
+            if in_string:
+                continue
+            if ch == '{':
+                if not stack:
+                    start = i
+                stack.append('{')
+            elif ch == '}':
+                if stack:
+                    stack.pop()
+                    if not stack:
+                        candidate = s[start:i+1]
                         data = try_parse(candidate)
                         if data:
                             return data
-                        start = text.find('{', i+1)
-                        break
-        else:
-            break
+        return None
 
-    # 4. Fallback: greedily match a JSON-like structure
-    match = re.search(r"(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})", text, re.DOTALL)
-    if match:
-        data = try_parse(match.group(1))
-        if data:
-            return data
+    data = find_json(text)
+    if data:
+        return data
 
+    # 4. Fallback: treat whole text as final answer
     return {"final_answer": text.strip()}
 
 
@@ -310,7 +309,7 @@ class AgentLoop:
         is_first_turn = True
         consecutive_failures = 0
 
-        # Spinner thread for active feedback
+        # Spinner
         stop_spinner = threading.Event()
         def spinner():
             chars = "⣾⣽⣻⢿⡿⣟⣯⣷"
@@ -320,7 +319,6 @@ class AgentLoop:
                 sys.stdout.flush()
                 time.sleep(0.15)
                 i += 1
-            # Clear spinner line
             sys.stdout.write("\r" + " " * 30 + "\r")
             sys.stdout.flush()
 
@@ -331,7 +329,6 @@ class AgentLoop:
                 is_first_turn = True
                 consecutive_failures = 0
 
-            # Start spinner
             stop_spinner.clear()
             spinner_thread = threading.Thread(target=spinner)
             spinner_thread.daemon = True
@@ -365,16 +362,20 @@ class AgentLoop:
 
             data = parse_response(response)
 
+            # ----- SAFETY: If final_answer itself looks like a tool call, re-parse -----
+            if "final_answer" in data:
+                maybe_tool = parse_response(data["final_answer"])
+                if "tool" in maybe_tool:
+                    data = maybe_tool
+                    console.print("[yellow][Agent] Re‑parsed final_answer as tool call[/]")
+
             if "final_answer" in data:
                 final_text = data["final_answer"]
-                # Unescape newlines and clean up
                 if isinstance(final_text, str):
-                    # Replace literal \n with actual newlines
                     final_text = final_text.replace('\\n', '\n')
-                    # Remove surrounding quotes if any
                     if final_text.startswith('"') and final_text.endswith('"'):
                         final_text = final_text[1:-1]
-                    # Try to parse nested JSON
+                    # one more attempt to unwrap nested JSON
                     nested = parse_response(final_text)
                     if "final_answer" in nested and nested["final_answer"] != final_text:
                         final_text = nested["final_answer"]
