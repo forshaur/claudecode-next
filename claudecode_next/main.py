@@ -411,6 +411,8 @@ def main():
                         provider=provider,
                         skip_confirm=skip
                     )
+                except Exception as e:
+                    console.print(f"[red]Agent error: {e}[/]")
                 finally:
                     streaming_status['active'] = False
             else:
@@ -419,6 +421,8 @@ def main():
                 try:
                     stream_fn(claude_creds if provider=='claude' else deepseek_session,
                               inp, model, discrete, session)
+                except Exception as e:
+                    console.print(f"[red]Streaming error: {e}[/]")
                 finally:
                     streaming_status['active'] = False
     finally:

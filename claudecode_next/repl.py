@@ -3,7 +3,6 @@
 import os
 import subprocess
 import time
-import threading
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -20,20 +19,14 @@ from .config import (
     DEEPSEEK_MODEL_DISPLAY,
 )
 
-# ---- Global streaming status (shared with main) ----
+# ---- Global streaming status ----
 streaming_status = {'active': False, 'start': 0.0}
-_app_ref = None  # will be set by main to allow invalidate
 
-def set_app_ref(app):
-    global _app_ref
-    _app_ref = app
-
-# ---- Status line with FormattedText (proper colors) ----
+# ---- Status line with FormattedText ----
 def get_status_line(model: str, discrete: bool, agent_mode: bool,
                     workspace: str, conv_id: str, streaming: bool = False,
                     elapsed: float = 0, provider: str = "claude",
                     thinking: bool = False, search: bool = False):
-    """Return a FormattedText for the bottom toolbar."""
     items = []
     items.append(('bold cyan', f'Provider: {provider}'))
     items.append(('', ' │ '))
@@ -41,13 +34,11 @@ def get_status_line(model: str, discrete: bool, agent_mode: bool,
     items.append(('', ' │ '))
 
     if provider == "deepseek":
-        # Show DeepSeek toggles
         items.append(('cyan', f'Think: {"ON" if thinking else "OFF"}'))
         items.append(('', ' │ '))
         items.append(('cyan', f'Search: {"ON" if search else "OFF"}'))
         items.append(('', ' │ '))
     else:
-        # Claude discrete mode
         color = 'red' if discrete else 'green'
         items.append((color, f'Discrete: {"ON" if discrete else "OFF"}'))
         items.append(('', ' │ '))
@@ -100,7 +91,6 @@ def handle_command(cmd: str, arg: str, *,
             print(f"  Current: {model}")
             print("  Usage: /model <name> (e.g., sonnet, haiku, instant, expert)")
         else:
-            # Try Claude aliases first, then DeepSeek
             new = resolve_model(arg) if arg in MODEL_ALIASES else None
             if new is None:
                 new = DEEPSEEK_MODEL_ALIASES.get(arg, arg)
@@ -187,7 +177,7 @@ def handle_command(cmd: str, arg: str, *,
             print("  Usage: /system edit|show")
 
     elif cmd == '/doctor':
-        from .repl import run_doctor
+        # run_doctor is defined in this module – no import needed
         run_doctor(creds)
 
     elif cmd == '/log':
@@ -198,7 +188,6 @@ def handle_command(cmd: str, arg: str, *,
         else:
             print("  No agent.log found in workspace.")
 
-    # ----- DeepSeek toggles -----
     elif cmd == '/think':
         if arg.lower() in ('on', '1', 'true'):
             session['thinking_enabled'] = True
@@ -265,7 +254,6 @@ def print_models(current, provider="claude"):
             print(f"    {alias:14s}  {full:36s}  [{tier}]{marker}")
     else:
         print("\n  DeepSeek models (API values):")
-        # Show unique API models
         api_models = set(DEEPSEEK_MODEL_ALIASES.values())
         for api_model in sorted(api_models):
             display = DEEPSEEK_MODEL_DISPLAY.get(api_model, api_model)
@@ -275,7 +263,6 @@ def print_models(current, provider="claude"):
             print(f"    {display:36s}  [{api_model}]{alias_str}{marker}")
     print()
 
-# ---- Doctor ----
 def run_doctor(creds):
     print("\n🔍 Running diagnostics...")
     from .credentials import CredentialManager

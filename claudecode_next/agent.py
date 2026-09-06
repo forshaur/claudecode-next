@@ -6,19 +6,13 @@ import subprocess
 import sys
 import time
 import difflib
+import threading
 from pathlib import Path
 from typing import Dict, Any
 
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.panel import Panel
-
-# ANSI colours (fallback)
-GREEN = "\033[92m"
-BLUE = "\033[94m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-RESET = "\033[0m"
 
 console = Console()
 
@@ -36,17 +30,13 @@ class ToolExecutor:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.log_file = self.workspace / "agent.log"
         self.max_read_bytes = 50 * 1024
-        self.confirm_required = True   # can be toggled
+        self.confirm_required = True
 
     def _resolve(self, path: str) -> Path:
         p = (self.workspace / path).resolve()
         if not str(p).startswith(str(self.workspace)):
             raise ValueError(f"Path outside workspace: {p}")
         return p
-
-    # --------------------------------------------------------------
-    # Tool implementations
-    # --------------------------------------------------------------
 
     def read_file(self, path: str) -> str:
         p = self._resolve(path)
@@ -141,6 +131,8 @@ class ToolExecutor:
             return f"ERROR patching {path}: {e}"
 
     def run_command(self, command: str, stream_output: bool = True) -> str:
+        # Security warning: shell=True is risky; we trust the user confirmation.
+        # In a production setting, implement a whitelist or use shell=False.
         try:
             proc = subprocess.Popen(
                 command,
@@ -180,16 +172,47 @@ class ToolExecutor:
         with self.log_file.open("a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {action} {detail}\n")
 
+    # ----- Helper for diff preview (used by confirm) -----
+    def _preview_diff(self, tool_name: str, args: dict) -> str:
+        """Generate a unified diff preview for write/patch operations without executing them."""
+        path = args.get("path")
+        if not path:
+            return ""
+        p = self._resolve(path)
+        if not p.exists() and tool_name == "patch_file":
+            return f"ERROR: file not found: {path}"
+        try:
+            old_content = p.read_text(encoding="utf-8-sig") if p.exists() else ""
+            if tool_name == "write_file":
+                new_content = args.get("content", "")
+            elif tool_name == "patch_file":
+                search = args.get("search", "")
+                replace = args.get("replace", "")
+                if search not in old_content:
+                    return "ERROR: search string not found in file."
+                new_content = old_content.replace(search, replace, 1)
+            else:
+                return ""
+            diff = difflib.unified_diff(
+                old_content.splitlines(),
+                new_content.splitlines(),
+                fromfile=f'a/{path}',
+                tofile=f'b/{path}',
+                lineterm=''
+            )
+            return '\n'.join(diff)
+        except Exception as e:
+            return f"Error generating diff: {e}"
+
 
 def parse_response(text: str) -> Dict[str, Any]:
     """Extract JSON tool call from model response, robustly."""
-    # Helper: try to parse a candidate string as JSON
+    # 1. Strip Markdown code fences
+    text = re.sub(r"```(?:json)?\s*|\s*```", "", text, flags=re.DOTALL).strip()
+
     def try_parse(candidate):
         try:
             data = json.loads(candidate)
-            # If it has _answer, rename to final_answer
-            if '_answer' in data and 'final_answer' not in data:
-                data['final_answer'] = data.pop('_answer')
             if 'tool' in data or 'final_answer' in data:
                 return data
             if 'name' in data and 'args' in data:
@@ -197,13 +220,12 @@ def parse_response(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             return None
 
-    # 1. Try full text
-    data = try_parse(text.strip())
+    # 2. Try direct parse
+    data = try_parse(text)
     if data:
         return data
 
-    # 2. Scan for JSON objects using brace counting, but collect all and pick the one with relevant keys
-    candidates = []
+    # 3. Scan for balanced JSON objects (handles nested braces and strings)
     start = text.find('{')
     while start != -1:
         brace_count = 0
@@ -227,29 +249,21 @@ def parse_response(text: str) -> Dict[str, Any]:
                         candidate = text[start:i+1]
                         data = try_parse(candidate)
                         if data:
-                            candidates.append(data)
+                            return data
                         start = text.find('{', i+1)
                         break
         else:
             break
 
-    # If we have candidates, pick the one with 'tool' first, then 'final_answer'
-    for data in candidates:
-        if 'tool' in data:
-            return data
-    for data in candidates:
-        if 'final_answer' in data:
-            return data
-
-    # 3. Fallback: greedy regex for JSON
-    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    # 4. Fallback: greedily match a JSON-like structure
+    match = re.search(r"(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})", text, re.DOTALL)
     if match:
         data = try_parse(match.group(1))
         if data:
             return data
 
-    # 4. Final fallback: treat whole text as final answer
     return {"final_answer": text.strip()}
+
 
 class AgentLoop:
     def __init__(self, creds, model: str, discrete: bool, session_state: dict,
@@ -270,6 +284,12 @@ class AgentLoop:
             return True
         if not self.confirm_required:
             return True
+
+        # Show diff preview for write/patch
+        preview = ""
+        if tool_name in ("write_file", "patch_file"):
+            preview = self.executor._preview_diff(tool_name, args)
+
         from prompt_toolkit import prompt
         from prompt_toolkit.validation import Validator, ValidationError
         class YesNoValidator(Validator):
@@ -279,6 +299,8 @@ class AgentLoop:
                     raise ValidationError(message="Please answer y or n")
         console.print(f"\n[yellow][Tool] {tool_name}[/]")
         console.print(f"  args: {json.dumps(args, indent=2)}")
+        if preview:
+            console.print(Panel(preview, title="Diff Preview", border_style="yellow"))
         ans = prompt("  Approve? (y/n) ", validator=YesNoValidator()).strip().lower()
         return ans in ('y', 'yes')
 
@@ -288,12 +310,32 @@ class AgentLoop:
         is_first_turn = True
         consecutive_failures = 0
 
+        # Spinner thread for active feedback
+        stop_spinner = threading.Event()
+        def spinner():
+            chars = "⣾⣽⣻⢿⡿⣟⣯⣷"
+            i = 0
+            while not stop_spinner.is_set():
+                sys.stdout.write(f"\r[Agent] Thinking {chars[i % len(chars)]} ")
+                sys.stdout.flush()
+                time.sleep(0.15)
+                i += 1
+            # Clear spinner line
+            sys.stdout.write("\r" + " " * 30 + "\r")
+            sys.stdout.flush()
+
         while True:
             console.print(f"[blue][Agent] Sending...[/]")
             if consecutive_failures >= 2:
                 console.print(f"[yellow][Agent] Re-sending system prompt (model forgot its role)[/]")
                 is_first_turn = True
                 consecutive_failures = 0
+
+            # Start spinner
+            stop_spinner.clear()
+            spinner_thread = threading.Thread(target=spinner)
+            spinner_thread.daemon = True
+            spinner_thread.start()
 
             import time as ttime
             streaming_status['active'] = True
@@ -308,8 +350,14 @@ class AgentLoop:
                     quiet=True,
                     system_prompt=system_prompt if is_first_turn else None,
                 )
+            except Exception as e:
+                console.print(f"[red]Streaming error: {e}[/]")
+                return f"ERROR: {e}"
             finally:
                 streaming_status['active'] = False
+                stop_spinner.set()
+                spinner_thread.join(timeout=0.5)
+
             is_first_turn = False
 
             if response is None:
@@ -319,18 +367,24 @@ class AgentLoop:
 
             if "final_answer" in data:
                 final_text = data["final_answer"]
-                # If the final_text contains JSON-like structure, try to re-parse it
-                # (sometimes model outputs nested JSON)
+                # Unescape newlines and clean up
                 if isinstance(final_text, str):
+                    # Replace literal \n with actual newlines
+                    final_text = final_text.replace('\\n', '\n')
+                    # Remove surrounding quotes if any
+                    if final_text.startswith('"') and final_text.endswith('"'):
+                        final_text = final_text[1:-1]
+                    # Try to parse nested JSON
                     nested = parse_response(final_text)
                     if "final_answer" in nested and nested["final_answer"] != final_text:
                         final_text = nested["final_answer"]
-                # Refusal detection
+
                 if any(phrase in final_text.lower() for phrase in ["i can't", "i don't have access", "i don't see", "can't access"]):
                     console.print(f"[yellow][Agent] Model gave a conversational refusal. Resetting...[/]")
                     consecutive_failures += 1
                     current_msg = f"REMINDER: You are a tool-calling agent. Output JSON only. Do not say you can't. Use tools. User request: {user_message}"
                     continue
+
                 console.print(f"[green][Agent] Final answer:[/]")
                 console.print(final_text)
                 return final_text
