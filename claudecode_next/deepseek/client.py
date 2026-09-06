@@ -142,6 +142,7 @@ class DeepSeekClient:
         model: Optional[str] = None,
         thinking: bool = False,
         search: bool = False,
+        system: Optional[str] = None,   # <-- new system prompt parameter
     ) -> "_Stream":
         """Stream a reply. Iterate it for text chunks; read `.conversation_id`
         afterwards to resume the thread. Pass an existing `conversation_id` to
@@ -152,6 +153,9 @@ class DeepSeekClient:
         with `conversation_id` — a thread's model is fixed when it's created, so
         resuming keeps the original model. `thinking` enables DeepThink reasoning
         and `search` enables web search; both are independent of the model.
+
+        `system` is an optional system prompt that will be sent as a top-level
+        `system` field in the request body.
         """
         if conversation_id and model is not None:
             raise ValueError(
@@ -166,7 +170,8 @@ class DeepSeekClient:
         else:
             # Resuming: let the existing thread's model stand (send no model_type).
             model_type = None
-        return _Stream(self, prompt, session_id, parent_id, model_type, thinking, search)
+        return _Stream(self, prompt, session_id, parent_id, model_type,
+                       thinking, search, system)   # <-- pass system
 
     def chat(
         self,
@@ -175,10 +180,12 @@ class DeepSeekClient:
         model: Optional[str] = None,
         thinking: bool = False,
         search: bool = False,
+        system: Optional[str] = None,
     ) -> Reply:
         """Return the complete reply (`.text`) plus its `.conversation_id`."""
         s = self.stream(prompt, conversation_id=conversation_id,
-                        model=model, thinking=thinking, search=search)
+                        model=model, thinking=thinking, search=search,
+                        system=system)
         text = "".join(s)
         return Reply(text=text, conversation_id=s.conversation_id)
 
@@ -192,7 +199,7 @@ class _Stream:
 
     def __init__(self, client: "DeepSeekClient", prompt: str, session_id: str,
                  parent_id: Optional[int], model: str,
-                 thinking: bool, search: bool):
+                 thinking: bool, search: bool, system: Optional[str] = None):
         self._client = client
         self._prompt = prompt
         self._session_id = session_id
@@ -200,6 +207,7 @@ class _Stream:
         self._model = model
         self._thinking = thinking
         self._search = search
+        self._system = system   # <-- store system prompt
         self._message_id: Optional[int] = None
 
     def __iter__(self) -> Iterator[str]:
@@ -213,9 +221,14 @@ class _Stream:
             "action": None,
             "preempt": False,
         }
+        # Include system prompt if provided
+        if self._system is not None:
+            body["system"] = self._system   # <-- DeepSeek API accepts this
+
         # Only select a model on a new thread; on resume the thread keeps its own.
         if self._model is not None:
             body["model_type"] = self._model
+
         # PoW challenges are short-lived, so solve right before the request.
         headers = {"x-ds-pow-response": self._client._pow_header()}
         meta: dict = {}

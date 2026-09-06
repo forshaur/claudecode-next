@@ -8,7 +8,8 @@ import time
 import difflib
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from rich.console import Console
 from rich.syntax import Syntax
@@ -290,6 +291,23 @@ def parse_response(text: str) -> Dict[str, Any]:
     return {"final_answer": cleaned.strip()}
 
 
+# -----------------------------------------------------------------------------
+# Helper to call stream_fn with a timeout
+# -----------------------------------------------------------------------------
+def _call_with_timeout(func, timeout=120):
+    """Call a function with a timeout using a thread pool."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise TimeoutError(f"Streaming took longer than {timeout}s – aborting.")
+        except Exception as e:
+            # re-raise any other exception
+            raise e
+
+
 class AgentLoop:
     def __init__(self, creds, model: str, discrete: bool, session_state: dict,
                  workspace: Path, provider: str = "claude",
@@ -354,6 +372,11 @@ class AgentLoop:
                 is_first_turn = True
                 consecutive_failures = 0
 
+            # Debug: show system prompt length
+            if is_first_turn and system_prompt:
+                console.print(f"[dim]System prompt length: {len(system_prompt)} chars[/]")
+                console.print(f"[dim]First 200 chars: {system_prompt[:200]}...[/]")
+
             stop_spinner.clear()
             spinner_thread = threading.Thread(target=spinner)
             spinner_thread.daemon = True
@@ -363,15 +386,21 @@ class AgentLoop:
             streaming_status['active'] = True
             streaming_status['start'] = ttime.time()
             try:
-                response = self.stream_fn(
-                    self.creds,
-                    current_msg,
-                    model=self.model,
-                    discrete=self.discrete,
-                    session_state=self.session,
-                    quiet=True,
-                    system_prompt=system_prompt if is_first_turn else None,
-                )
+                # Call stream_fn with a timeout (120s)
+                def do_stream():
+                    return self.stream_fn(
+                        self.creds,
+                        current_msg,
+                        model=self.model,
+                        discrete=self.discrete,
+                        session_state=self.session,
+                        quiet=True,
+                        system_prompt=system_prompt if is_first_turn else None,
+                    )
+                response = _call_with_timeout(do_stream, timeout=120)
+            except TimeoutError as e:
+                console.print(f"[red]Timeout: {e}[/]")
+                return f"ERROR: {e}"
             except Exception as e:
                 console.print(f"[red]Streaming error: {e}[/]")
                 return f"ERROR: {e}"
