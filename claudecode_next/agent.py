@@ -92,37 +92,23 @@ class ToolExecutor:
         except Exception as e:
             return f"ERROR patching {path}: {e}"
 
-    def run_command(self, command: str, stream_output: bool = True) -> str:
+    def run_command(self, command: str) -> str:
+        # Always captured silently — the caller is responsible for any
+        # terminal rendering (sleek status line), never raw piped chunks.
         try:
-            proc = subprocess.Popen(
+            proc = subprocess.run(
                 command,
                 shell=True,
                 cwd=self.workspace,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1,
             )
-            output_lines = []
-            if stream_output:
-                print(f"{YELLOW}[Command] {command}{RESET}")
-            while True:
-                line = proc.stdout.readline()
-                if not line and proc.poll() is not None:
-                    break
-                if line:
-                    if stream_output:
-                        sys.stdout.write(line)
-                        sys.stdout.flush()
-                    output_lines.append(line)
-            proc.wait()
-            full_output = "".join(output_lines)
-            lines = full_output.splitlines()
+            lines = proc.stdout.splitlines()
             if len(lines) > 200:
-                truncated = "\n".join(lines[-200:])
-                result = f"(truncated to last 200 lines)\n{truncated}\n"
+                result = "(truncated to last 200 lines)\n" + "\n".join(lines[-200:]) + "\n"
             else:
-                result = full_output
+                result = proc.stdout
             result += f"\n[exit code: {proc.returncode}]"
             return result
         except Exception as e:
@@ -137,8 +123,7 @@ def parse_response(text: str) -> Dict[str, Any]:
     """Extract JSON tool call from Claude's response."""
     # 1. Try full JSON parse
     try:
-        data = json.loads(text.strip())
-        return data
+        return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
 
@@ -163,11 +148,20 @@ def parse_response(text: str) -> Dict[str, Any]:
     if stripped.startswith("{") and stripped.endswith("}"):
         try:
             return json.loads(stripped)
-        except:
+        except Exception:
             pass
 
     # 5. Fallback: plain text
     return {"final_answer": text}
+
+
+def _unescape(text: str) -> str:
+    """Undo literal \\n / \\" / \\t sequences left over from double-encoded text."""
+    return text.replace("\\n", "\n").replace('\\"', '"').replace("\\t", "\t")
+
+
+def _format_args(args: dict) -> str:
+    return ", ".join(f"{k}={v!r}" for k, v in args.items())
 
 
 class AgentLoop:
@@ -207,9 +201,8 @@ class AgentLoop:
         consecutive_failures = 0  # count non-JSON responses
 
         while True:
-            print(f"{BLUE}[Agent] Sending...{RESET}")
-
-            # If we've had two non-JSON responses, resend system prompt as a reminder
+            # response is accumulated silently by stream_prompt (quiet=True);
+            # nothing is piped raw to the terminal here.
             if consecutive_failures >= 2:
                 print(f"{YELLOW}[Agent] Re-sending system prompt (Claude forgot its role){RESET}")
                 is_first_turn = True
@@ -231,37 +224,30 @@ class AgentLoop:
 
             data = parse_response(response)
 
-            # Detect conversational refusal (Claude forgot its role)
             if "final_answer" in data:
-                final_text = data["final_answer"]
-                # If it sounds like a refusal, treat as failure
+                final_text = _unescape(data["final_answer"])
                 if any(phrase in final_text.lower() for phrase in ["i can't", "i don't have access", "i don't see", "can't access"]):
                     print(f"{YELLOW}[Agent] Claude gave a conversational refusal. Resetting...{RESET}")
                     consecutive_failures += 1
-                    # Send a strong reminder as the next user message
                     current_msg = f"REMINDER: You are a tool-calling agent. Output JSON only. Do not say you can't. Use tools. User request: {user_message}"
                     continue
 
-                # Otherwise it's a proper final answer
-                print(f"{GREEN}[Agent] Final answer:{RESET}")
-                print(final_text)
+                print(f"{GREEN}[Answer]{RESET} {final_text}")
                 return final_text
 
             if "tool" in data:
                 tool = data["tool"]
                 name = tool.get("name")
                 args = tool.get("args", {})
-                if "thought" in data:
-                    print(f"{BLUE}[Thought] {data['thought']}{RESET}")
 
                 if not self._confirm(name, args):
                     current_msg = f"Tool {name} was rejected by user. Please propose an alternative or final answer."
                     continue
 
+                print(f"{BLUE}[Tool]{RESET} Executing {name}({_format_args(args)})")
                 result = self._execute_tool(name, args)
                 self.executor.log_action(name, f"{args} -> {result[:200]}")
 
-                # Tool result as next user message
                 current_msg = f"Tool result for {name}({json.dumps(args)}):\n{result}"
                 consecutive_failures = 0  # reset on success
 
@@ -279,7 +265,6 @@ class AgentLoop:
         config_path = Path(__file__).parent / "system_prompt.txt"
         if config_path.exists():
             return config_path.read_text(encoding="utf-8").strip()
-        # Fallback default if file is missing
         return (
             "Role: Local CLI tool-calling executor. !CHAT. !ASSUME.\n"
             "Output RAW JSON ONLY. Use tools to fulfill requests.\n"
@@ -287,6 +272,9 @@ class AgentLoop:
             "Final: {\"final_answer\": \"...\"}"
         )
 
+
 def process_task(creds, user_message, model, discrete, session_state, workspace=".", skip_confirm=False):
     loop = AgentLoop(creds, model, discrete, session_state, Path(workspace), skip_confirm)
     return loop.process_task(user_message)
+
+

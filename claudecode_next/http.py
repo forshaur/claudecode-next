@@ -70,7 +70,7 @@ def _create_conversation(creds, conv_id, model):
         return False
 
 
-def _feed_sse_line(line, parts):
+def _feed_sse_line(line, parts, quiet=False):
     """Parse one SSE 'data: ...' line, appending any streamed text to parts.
     Returns True if the stream is done (message_stop or [DONE])."""
     line = line.strip()
@@ -89,8 +89,9 @@ def _feed_sse_line(line, parts):
         if delta.get("type") == "text_delta":
             txt = delta.get("text", "")
             parts.append(txt)
-            sys.stdout.write(txt)
-            sys.stdout.flush()
+            if not quiet:
+                sys.stdout.write(txt)
+                sys.stdout.flush()
     elif t == "error":
         print(f"\n[!] {obj.get('error', {}).get('message', str(obj))}")
     elif t == "message_stop":
@@ -164,7 +165,7 @@ def stream_prompt(creds, prompt, model=DEFAULT_MODEL, discrete=True, session_sta
         buffer += text
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            if _feed_sse_line(line, parts):
+            if _feed_sse_line(line, parts, quiet=quiet):
                 return
 
     resp = None
@@ -178,7 +179,7 @@ def stream_prompt(creds, prompt, model=DEFAULT_MODEL, discrete=True, session_sta
             resp = std_requests.post(endpoint, json=payload, headers=headers, timeout=120)
             if resp.status_code == 200:
                 for line in resp.text.split("\n"):
-                    if _feed_sse_line(line, parts):
+                    if _feed_sse_line(line, parts, quiet=quiet):
                         break
     except Exception as e:
         print(f"\n[!] Request error: {e}")
